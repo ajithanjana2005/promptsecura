@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { findAdapter, hostnameMatches } from "../src/content/sites/adapter";
-import { ChatGPTAdapter } from "../src/content/sites/chatgpt";
+import { ChatGPTAdapter, EDITOR_SELECTORS } from "../src/content/sites/chatgpt";
 
 const adapter = new ChatGPTAdapter();
 
@@ -17,15 +17,15 @@ test("ChatGPT adapter matches ChatGPT hosts over HTTPS only", () => {
   assert.equal(adapter.matches(new URL("https://gemini.google.com/")), false);
 });
 
-test("ChatGPT placeholder adapter declares no capabilities and does nothing", () => {
+test("ChatGPT adapter is read-only: can read/observe, cannot write or intercept", () => {
   assert.equal(adapter.id, "chatgpt");
   assert.equal(adapter.displayName, "ChatGPT");
   assert.deepEqual({ ...adapter.capabilities }, {
-    readPrompt: false,
+    readPrompt: true,
+    observeInput: true,
     writePrompt: false,
     interceptSubmit: false,
   });
-  assert.equal(adapter.getPromptText(), null);
   assert.equal(adapter.setPromptText("x"), false);
   let called = false;
   const unsubscribe = adapter.onSubmitAttempt(async () => {
@@ -35,6 +35,20 @@ test("ChatGPT placeholder adapter declares no capabilities and does nothing", ()
   assert.equal(typeof unsubscribe, "function");
   unsubscribe();
   assert.equal(called, false);
+});
+
+test("ChatGPT adapter is inert without a DOM", () => {
+  assert.equal(adapter.findEditor(), null);
+  assert.equal(adapter.getPromptText(), null);
+  assert.equal(adapter.getIndicatorAnchor(), null);
+  const stop = adapter.observeInput(() => {});
+  assert.equal(typeof stop, "function");
+  stop();
+});
+
+test("editor selectors target the ChatGPT composer, most specific first", () => {
+  assert.equal(EDITOR_SELECTORS[0], '#prompt-textarea[contenteditable="true"]');
+  assert.ok(EDITOR_SELECTORS.every((s) => s.includes("prompt-textarea") || s.includes("ProseMirror")));
 });
 
 test("findAdapter picks the matching adapter or null", () => {

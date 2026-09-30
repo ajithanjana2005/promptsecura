@@ -2,7 +2,7 @@
 
 PromptSecura checks prompts before they are sent to AI websites. It detects personal data (PII) and prompt-injection/jailbreak attempts, scores the risk, and decides **ALLOW**, **SANITIZE** or **BLOCK**.
 
-**Current status: Phase 3.** The backend analyzes prompts (Phases 1–2). The Chrome extension skeleton is in place (Phase 3), but it **does not check ChatGPT prompts yet**: prompt interception comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
+**Current status: Phase 4 (ChatGPT read-only integration).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension analyzes the prompt as you type and shows a risk indicator next to the input (Phases 3–4). It is **read-only**: it never blocks, changes or intercepts sending. Enforcement comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
 
 ## Architecture (Phase 1)
 
@@ -54,7 +54,10 @@ It never returns a partial or "safe" result. The Chrome extension (Phase 3) will
    ```
    Interactive API docs are served at `/docs`. In Codespaces, open the **Ports** tab and use the forwarded address for port 8000.
 
-**Port visibility.** Leave port 8000 **private** in Phase 1. The API has no authentication yet. It only needs to be reachable from the browser extension starting in Phase 2, and a shared token is planned before the port is ever made public.
+**Port visibility and the extension.** The Chrome extension runs on your own computer, so it has to reach the backend over the network. A Codespaces port that is **private** requires a GitHub login, which the extension cannot provide, so the indicator will show "Backend Unavailable". There are two options:
+
+- **Recommended while there is no authentication:** run the backend on your own machine (see *Run locally*), and build the extension with the default `http://localhost:8000`.
+- **Use the Codespace:** set port 8000 to **public** in the Ports tab, and build the extension with `PROMPTSECURA_BACKEND_URL=https://<codespace-name>-8000.app.github.dev`. The API has **no authentication yet**, so anyone who knows the URL can call it. Only do this with test prompts, and set the port back to private afterwards.
 
 ## Run locally (optional)
 
@@ -148,13 +151,40 @@ All settings are optional environment variables. See [`.env.example`](.env.examp
 
 The rules live in `backend/app/rules/injection_rules.yaml`: regexes with weights and categories. Rules are a baseline. Paraphrased attacks can get through, and some benign prompts can match. Every rule change should come with a test in `backend/tests/test_injection.py`.
 
-## Chrome extension (Phase 3 skeleton)
+## Chrome extension
 
-The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling. In this phase:
+The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling.
 
-- The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It exposes an internal message route, but nothing sends prompts to it yet.
-- The **content script** loads on `chatgpt.com` / `chat.openai.com` and selects the site adapter. The **ChatGPT adapter is a placeholder**: it does not read the prompt, change the page, or intercept sending. The content script logs that prompts are not being checked.
+- The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It is the only part that talks to the backend.
+- The **content script** runs on `chatgpt.com` and `chat.openai.com`. It reads the prompt editor as you type or paste, asks the service worker to analyze the text (debounced), and shows a risk indicator next to the input.
 - The **popup** shows the protection status, the supported site (ChatGPT), the configured backend URL, and a backend status placeholder ("Not checked").
+
+### What you see on ChatGPT (read-only)
+
+A small pill labelled "PromptSecura" appears just above the message box while there is text in it:
+
+| Indicator | Meaning |
+|---|---|
+| Analyzing… (grey, pulsing) | The text changed and a check is pending or running. |
+| **Safe** (green) | The backend decided ALLOW. |
+| **Medium Risk** (amber) | The backend decided SANITIZE. It found PII that could be replaced with placeholders. |
+| **High Risk** (red) | The backend decided BLOCK. This includes medium scores that sanitization cannot fix, such as injection text. |
+| **Backend Unavailable** (grey) | No decision could be made: the backend is unreachable, returned an error, or sent an invalid response. The prompt has **not** been checked. |
+| Too Long to Analyze (grey) | The backend refused the prompt as longer than `PROMPTSECURA_MAX_PROMPT_CHARS`. |
+
+Hover over the pill to see the risk score and the backend's reasons. Reasons name the type of finding, such as `EMAIL_ADDRESS` or a rule id, never the text itself. The pill disappears when the message box is empty.
+
+**Sending is not affected.** Enter and the Send button work exactly as they do without the extension, even at High Risk. The extension doesn't listen to key presses, clicks or form submits, and never changes ChatGPT's page. The indicator is drawn in its own isolated element, outside ChatGPT's page structure. Blocking and sanitizing before Send come in the enforcement phase.
+
+**Timing.** Analysis runs 600 ms after you stop typing, or 150 ms after a paste. The editor is also re-checked every second, which catches changes that fire no typing event, such as ChatGPT clearing the box after sending. These values are in `extension/src/shared/config.ts`.
+
+**Privacy.** Prompt text is sent only to the configured PromptSecura backend, through the service worker. It is never logged by the extension or shown in the indicator.
+
+**If the indicator never appears on ChatGPT:**
+
+1. Make sure the backend is running and that the extension was built with the right `PROMPTSECURA_BACKEND_URL`.
+2. In DevTools → Console on chatgpt.com, look for `[PromptSecura] ChatGPT: read-only analysis active`.
+3. If that line appears but typing shows nothing, ChatGPT's page structure has probably changed. The editor selectors live in `EDITOR_SELECTORS` in `extension/src/content/sites/chatgpt.ts`. They were written against ChatGPT's known composer markup (`#prompt-textarea`, a ProseMirror editor), but could not be checked against the live site from the development environment.
 
 ### Requirements
 
@@ -208,7 +238,7 @@ The value must be an origin only (no path), and invalid values fail the build. S
 
 After rebuilding, click the **reload** icon on the PromptSecura card in `chrome://extensions`.
 
-To see the content script's status message, open `chatgpt.com` and look at DevTools → Console. You should see: `[PromptSecura] ChatGPT: prompt interception is not implemented in this build; prompts on this site are not being checked.`
+To check that it is working, start the backend, open `chatgpt.com` and type in the message box. The PromptSecura indicator should appear above it.
 
 ## Repository layout
 
@@ -227,7 +257,8 @@ backend/
 extension/
   src/manifest.json   MV3 manifest (build adds backend host permission)
   src/background/     service worker + backend API client
-  src/content/        content script + site adapters (sites/adapter.ts, sites/chatgpt.ts)
+  src/content/        content script: site adapters (sites/), analysis controller,
+                      indicator UI, service-worker messaging
   src/popup/          popup page
   src/shared/         shared types, build-time config, logger
   test/               unit tests

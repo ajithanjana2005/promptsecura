@@ -7,7 +7,8 @@
 | 1 | Repo scaffold + backend foundation | Code complete; **Codespaces verification pending** |
 | 2 | PII detection and sanitization | Code complete; **Codespaces verification pending** |
 | 3 | Chrome extension skeleton (MV3, TypeScript, esbuild) | Built and verified in sandbox Chromium; **`npm install` + typecheck with real `@types/chrome` pending** |
-| 4 | To be defined (recommended below) | Not started |
+| 4 | ChatGPT read-only integration (editor reading, debounced analysis, risk indicator) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page**; **live chatgpt.com not tested** |
+| 5 | Enforcement (recommended below) | Not started |
 
 Phase numbering follows the instructions given per phase.
 
@@ -24,8 +25,12 @@ Phase numbering follows the instructions given per phase.
 - **Phase 2: `IP_ADDRESS` weight raised from 30 to 35**, so an IP address alone is sanitized rather than allowed.
 - **Phase 3: backend URL is build-time configuration** (`PROMPTSECURA_BACKEND_URL`). The build also adds that origin to `host_permissions`, so the service worker can call it without CORS. Changing it requires a rebuild.
 - **Phase 3: all backend calls go through the service worker**, never the content script, which is subject to the page's CORS/CSP.
-- **Phase 3: adapters declare capabilities.** The ChatGPT placeholder declares none, and the content script checks capabilities before doing anything.
-- **Phase 3: the popup's "Protection status: Active"** is shown as requested, together with a line saying prompt checks on ChatGPT are not enabled in this build yet. The backend status shows "Not checked" rather than a state that was never observed.
+- **Phase 3: adapters declare capabilities**, and the content script checks them before relying on any feature.
+- **Phase 3: the popup's "Protection status: Active"** is shown as requested. A note underneath describes what the extension actually does; since Phase 4 it reads "ChatGPT prompts are checked as you type (read-only). Sending is not blocked in this version." The backend status shows "Not checked" rather than a state that was never observed.
+- **Phase 4: the indicator follows the backend decision**, not just the risk level: ALLOW → Safe, SANITIZE → Medium Risk, BLOCK → High Risk. A medium score escalated to BLOCK therefore shows as High Risk, which matches what enforcement will do.
+- **Phase 4: any failure shows "Backend Unavailable" and never "Safe".** One exception: an HTTP 413 shows "Too Long to Analyze", because the backend is up and it is not an outage.
+- **Phase 4: strictly read-only.** Only passive, capture-phase `input` and `paste` listeners are registered. There are no keydown, click or submit listeners, `preventDefault` is never called, and nothing is written into ChatGPT's DOM. The indicator is a Shadow-DOM host attached to `<html>`, outside ChatGPT's React tree, and positioned with fixed coordinates.
+- **Phase 4: debounce is 600 ms after typing and 150 ms after a paste**, with a 1 s editor poll. The poll catches changes without input events, such as ChatGPT clearing the editor after Send or a new chat replacing it. Stale responses are discarded with sequence numbers, and unchanged text is never re-sent.
 
 ## Implemented
 
@@ -69,6 +74,26 @@ Phase numbering follows the instructions given per phase.
   - Strict `tsconfig.json`
   - Unit tests
 - **Backend:** unchanged. No compatibility change was needed; the existing CORS regex already allows `chrome-extension://` origins.
+
+### Phase 4
+
+All changes are in `extension/`; the backend is unchanged.
+
+- **`content/sites/chatgpt.ts`: the read-only ChatGPT adapter.**
+  - It declares the `readPrompt` and `observeInput` capabilities; `writePrompt` and `interceptSubmit` stay false.
+  - `EDITOR_SELECTORS` lists the editor selectors, tried in order, visible elements only: `#prompt-textarea[contenteditable="true"]`, `div.ProseMirror[contenteditable="true"]`, `textarea#prompt-textarea`.
+  - It reads text via `innerText` for contenteditable, or `value` for a textarea.
+  - It observes typing and paste with passive capture listeners on `document`.
+  - The indicator anchors to the editor's `<form>`.
+- **`content/sites/adapter.ts`:** the interface gains `observeInput` in the capabilities, plus `findEditor()`, `getIndicatorAnchor()` and `observeInput(listener)`.
+- **`content/analysis-controller.ts`:** debounce, the paste fast path, stale-response discarding, the unchanged-text skip, reuse of the last verdict, and failures that are never cached. It is DOM-free and uses injectable timers.
+- **`content/indicator-state.ts`:** the states (idle, Analyzing…, Safe, Medium Risk, High Risk, Backend Unavailable / Too Long to Analyze), plus the labels and tooltips.
+- **`content/indicator.ts`:** a Shadow-DOM pill with a coloured dot, label and score. The tooltip shows the backend reasons. It follows ChatGPT's light/dark theme and uses fixed positioning above the composer's top-right corner.
+- **`content/messaging.ts`:** the content script → service worker bridge. The reply is validated at runtime, and any messaging error (e.g. an extension reload) fails closed.
+- **`content/index.ts`:** wires everything together and logs `read-only analysis active`.
+- **`shared/config.ts`:** adds `TYPING_DEBOUNCE_MS`, `PASTE_DEBOUNCE_MS` and `EDITOR_POLL_MS`.
+- **Popup:** the note now describes read-only mode.
+- **Unchanged:** the service worker and API client needed no changes. The existing `promptsecura/analyze` route is now used by the content script.
 
 ## Test status
 
@@ -146,6 +171,47 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
 
 **Still to run with real dependencies:** `cd extension && npm install && npm run check`. This is the first real dependency resolution and the first typecheck against the real `@types/chrome`. Commit the generated `package-lock.json` afterwards.
 
+### Phase 4 — extension
+
+As in Phase 3, there's no npm registry access. The checks used the local esbuild 0.27.7 and TypeScript 6.0.3.
+
+| Check | Result |
+|---|---|
+| `npm run build` / `npm run build:prod` | **Passed.** |
+| `npm run typecheck` as shipped | **Still fails in the sandbox**, only because `@types/chrome` is missing (`TS2688`). This is unchanged from Phase 3. |
+| `tsc` strict against the sandbox-only `chrome.runtime` stub | **Passed, 0 errors**, all src/test files checked. |
+| `npm test` | **42/42 passed.** That's 20 from Phase 3, with the adapter tests updated for the read-only contract, plus 22 new: 12 controller, 8 indicator-state/messaging, and 2 adapter. |
+| Mutation check on the new logic (each mutation in an isolated copy) | **6/6 caught:** stale responses kept, failures cached as verdicts, no debounce, reply not validated, BLOCK shown as medium, adapter claiming `interceptSubmit`. |
+| Real Chromium 141, Phase 4 harness | **23/23 passed.** See below. |
+| Real Chromium 141, Phase 3 harness (regression) | **21/21 passed.** Its content-script check was updated to the new read-only log message. |
+| Backend | **0 files changed**; 83/83 offline backend tests pass. |
+
+The Phase 4 harness is a sandbox-only script. It serves a **fixture page at `https://chatgpt.com/`** that imitates ChatGPT's composer:
+
+- A ProseMirror-style `#prompt-textarea` contenteditable inside a `<form>`, plus a hidden fallback textarea.
+- Page-owned Enter and Send handlers that clear the editor programmatically, as ChatGPT does.
+
+A **fixture API server** returns canned ALLOW / SANITIZE / BLOCK / 503 responses. The harness verified:
+
+- **Startup:** the read-only log line appears, and with an empty editor there is no indicator and no request.
+- **Typing:** "Analyzing…" shows, then "Safe". Typing 11 characters sends **one** request containing the full text, and the score is shown.
+- **Position:** the indicator sits 6 px above the composer, right-aligned.
+- **States:**
+  - Clearing the editor hides the indicator.
+  - An email address shows "Medium Risk" with score 35/100.
+  - A paste leads to "High Risk", and the request went out after **161 ms**, under the typing debounce.
+- **Send is unchanged:**
+  - **Enter still sends a High Risk prompt**, and the Enter keydown was not `defaultPrevented` by the extension.
+  - The indicator hides after the page clears the editor without an input event (via the poll).
+  - The Send button still sends.
+- **Failures:** a 503 shows "Backend Unavailable", with a tooltip saying the prompt has not been checked. A stopped server also shows "Backend Unavailable".
+- **Isolation and privacy:**
+  - The indicator host is attached to `<html>`, and neither `<body>` nor the form contains any PromptSecura element.
+  - Neither the page console nor the indicator ever contains prompt text.
+- **Popup:** the note describes read-only mode.
+
+**Not tested:** the live chatgpt.com, desktop Google Chrome, and the real backend over HTTP (FastAPI can't be installed here).
+
 ## Limitations
 
 - **Presidio has not been run.** Detection quality, recognizer names, and the specific test inputs (e.g. the credit-card format with spaces) are unconfirmed until the Codespace run.
@@ -156,10 +222,13 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
 - **Placeholders are generic.** Two different emails both become `[EMAIL]`, and the original values cannot be restored.
 - **Dependency ranges are not pinned** to verified versions yet. Run `pip freeze` after a green Codespace run.
 - **Rule-based injection detection** limitations are unchanged from Phase 1.
-- **The extension does not protect anything yet.** The ChatGPT adapter is a placeholder; no prompts are read, analyzed or blocked.
+- **The extension warns but does not protect yet.** It is read-only: High Risk prompts can still be sent. Enforcement is the next phase.
+- **The ChatGPT selectors have not been tested on the live chatgpt.com**, which is unreachable from the sandbox. They match ChatGPT's known composer markup, and were verified only against a fixture page that imitates it. This is the most likely point of failure. If the indicator never appears, check `EDITOR_SELECTORS` (see README → troubleshooting).
+- **After "Backend Unavailable", there is no automatic retry** while the text is unchanged. The next edit triggers a new check.
+- **The indicator position is heuristic.** It is placed above the right edge of the composer's `<form>`, and may need adjusting against the real layout.
 - **No `package-lock.json`** could be generated without registry access. The `@types/chrome` range (`>=0.0.268 <1`) has not been resolved against npm yet.
 - **Backend URL changes need a rebuild.** A runtime setting (popup/options) would require `optional_host_permissions`, which is planned for later.
-- **Codespaces port visibility.** For the extension to reach a Codespaces backend, port 8000 must be **public**, because private ports require a GitHub login. The API has no authentication yet, so keep it private until an auth phase. This does not matter in Phase 3, since nothing calls the backend yet.
+- **Codespaces port visibility now matters.** The extension calls the backend, and a private Codespaces port requires a GitHub login, which the extension can't provide. The indicator then shows "Backend Unavailable". Run the backend locally, or make the port public temporarily with test prompts only; the API has no authentication. See README → *Port visibility and the extension*.
 - **No extension icons.** Chrome shows a default icon.
 
 ## Next phase
@@ -167,21 +236,17 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
 1. **Verify everything with real dependencies first:**
    - `cd backend && python -m pytest` should give 110 passed, 0 skipped.
    - `cd extension && npm install && npm run check`.
-2. **Recommended Phase 4: ChatGPT adapter plus read-only analysis and indicator.**
-   - Implement the ChatGPT adapter's `readPrompt` capability: locate the prompt editor and read its text.
-   - On typing (debounced) and on send, send the text to the service worker's `promptsecura/analyze` route.
-   - Show the on-page indicator (analyzing / safe / sanitize / block / "could not complete").
-   - **Do not block sending yet.** This validates the DOM integration and the real network path with low risk.
-3. **Then enforcement:**
-   - Intercept Enter and the send button (`interceptSubmit`) and apply ALLOW/SANITIZE/BLOCK, with fail-closed behaviour on Send.
-   - Write the sanitized prompt back into the editor (`writePrompt`).
+   - **New in Phase 4:** load `extension/dist` in desktop Chrome, run the backend, and type on the real chatgpt.com. Confirm that the indicator appears and changes state. If it doesn't, fix `EDITOR_SELECTORS` first; everything later depends on it.
+2. **Recommended Phase 5: enforcement on ChatGPT.**
+   - Implement `interceptSubmit`: capture Enter and the send button, re-analyze the final text on Send, and apply ALLOW / SANITIZE / BLOCK.
+   - Implement `writePrompt` for "Use Sanitized Prompt", plus "Edit" on BLOCK.
+   - Apply the agreed **fail-closed** Send policy: "PromptSecura could not complete the security analysis." with edit/retry.
 
 ## Deliberately deferred
 
 The following are out of scope so far:
 
-- ChatGPT DOM integration and prompt interception
-- Enforcement UI and fail-closed Send handling (backend and API client already support it)
+- Send interception and enforcement (BLOCK/SANITIZE on Send), writing the sanitized prompt, and fail-closed Send handling (backend and API client already support it)
 - Live backend health check in the popup, and extension↔backend authentication
 - Dashboard and database
 - Gemini and Claude support

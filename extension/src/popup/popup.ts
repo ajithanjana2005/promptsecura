@@ -1,7 +1,7 @@
 /**
  * Popup script.
  *
- * Phase 3: static information only. The backend status is a placeholder
+ * Static information only. The backend status is a placeholder
  * ("Not checked"); a real /health check is a later phase. Nothing here
  * reports a backend state it has not actually observed.
  */

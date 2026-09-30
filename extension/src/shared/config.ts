@@ -30,6 +30,19 @@ export const API_PATHS = {
 /** How long to wait for the backend before failing closed. */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
+/** Wait this long after the last keystroke before analyzing (content script). */
+export const TYPING_DEBOUNCE_MS = 600;
+
+/** Shorter wait after a paste, since the text arrives all at once. */
+export const PASTE_DEBOUNCE_MS = 150;
+
+/**
+ * How often the content script re-checks the editor. Catches changes that
+ * fire no input event (e.g. ChatGPT clearing the editor after Send, or a new
+ * chat replacing the editor) and keeps the indicator positioned.
+ */
+export const EDITOR_POLL_MS = 1_000;
+
 /** Shown whenever no security decision could be made. Matches the backend. */
 export const FAIL_CLOSED_MESSAGE = "PromptSecura could not complete the security analysis.";
 

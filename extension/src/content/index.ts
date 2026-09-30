@@ -1,15 +1,28 @@
 /**
  * PromptSecura content script entry point.
  *
- * Injected on supported AI sites (see manifest.json content_scripts). It
- * selects the site adapter for the current page and, in later phases, will
- * wire adapter submit events -> service worker analysis -> on-page UI.
+ * Phase 4 (read-only): on a supported site, observe the prompt editor,
+ * analyze its text through the service worker (debounced), and show the risk
+ * indicator next to the composer.
  *
- * Phase 3 status: adapter selection only. No prompt is read, no DOM is
- * modified, and no submit is intercepted.
+ * Read-only guarantee: nothing here blocks, delays, alters or intercepts
+ * sending. The site's Enter key and send button behave exactly as without
+ * the extension. Enforcement is a later phase and requires an adapter with
+ * the interceptSubmit capability.
+ *
+ * Privacy: prompt text goes only to the service worker (and from there to the
+ * configured PromptSecura backend). It is never logged or shown on the page.
  */
 
+import {
+  EDITOR_POLL_MS,
+  PASTE_DEBOUNCE_MS,
+  TYPING_DEBOUNCE_MS,
+} from "../shared/config";
 import { log } from "../shared/log";
+import { AnalysisController } from "./analysis-controller";
+import { RiskIndicator } from "./indicator";
+import { createAnalyzer } from "./messaging";
 import type { SiteAdapter } from "./sites/adapter";
 import { findAdapter } from "./sites/adapter";
 import { ChatGPTAdapter } from "./sites/chatgpt";
@@ -18,6 +31,48 @@ import { ChatGPTAdapter } from "./sites/chatgpt";
 const ADAPTERS: readonly SiteAdapter[] = [new ChatGPTAdapter()];
 
 const INSTANCE_FLAG = "__promptsecuraContentScriptLoaded";
+
+function start(adapter: SiteAdapter): void {
+  const indicator = new RiskIndicator(document);
+  const reposition = (): void => indicator.position(adapter.getIndicatorAnchor());
+
+  const controller = new AnalysisController({
+    analyze: createAnalyzer(adapter.id, (message) => chrome.runtime.sendMessage(message)),
+    render: (state) => {
+      indicator.render(state);
+      reposition();
+      log.debug("indicator state", state.kind); // state only, never text
+    },
+    typingDebounceMs: TYPING_DEBOUNCE_MS,
+    pasteDebounceMs: PASTE_DEBOUNCE_MS,
+  });
+
+  // Typing and paste (passive listeners registered by the adapter).
+  adapter.observeInput((reason) => {
+    if (reason === "paste") {
+      // The pasted text is inserted after the paste event; read it afterwards.
+      setTimeout(() => controller.onTextChanged(adapter.getPromptText(), "paste"), 0);
+    } else {
+      controller.onTextChanged(adapter.getPromptText(), "input");
+    }
+  });
+
+  // Poll: catches changes without input events (editor cleared after Send,
+  // new chat, restored drafts) and keeps the indicator next to the composer.
+  setInterval(() => {
+    controller.onTextChanged(adapter.getPromptText(), "poll");
+    reposition();
+  }, EDITOR_POLL_MS);
+
+  window.addEventListener("resize", reposition, { passive: true });
+  window.addEventListener("scroll", reposition, { passive: true, capture: true });
+
+  controller.onTextChanged(adapter.getPromptText(), "init");
+  log.info(
+    `${adapter.displayName}: read-only analysis active. ` +
+      "Prompts are checked as you type; sending is not blocked or modified.",
+  );
+}
 
 function main(): void {
   const scope = globalThis as typeof globalThis & Record<string, unknown>;
@@ -29,19 +84,11 @@ function main(): void {
     log.debug("no adapter for this page");
     return;
   }
-
-  log.debug(`adapter selected: ${adapter.id}`, adapter.capabilities);
-
-  if (!adapter.capabilities.interceptSubmit) {
-    log.info(
-      `${adapter.displayName}: prompt interception is not implemented in this build; ` +
-        "prompts on this site are not being checked.",
-    );
+  if (!adapter.capabilities.readPrompt || !adapter.capabilities.observeInput) {
+    log.info(`${adapter.displayName}: prompt analysis is not supported by this adapter.`);
     return;
   }
-
-  // Later phase: adapter.onSubmitAttempt(...) -> chrome.runtime.sendMessage(
-  //   { type: MessageType.Analyze, payload: { prompt, site: adapter.id } }) -> UI.
+  start(adapter);
 }
 
 main();
