@@ -1,0 +1,1727 @@
+From 9c0c6d3c3d16afe43d6027d941b803cf3d2773b4 Mon Sep 17 00:00:00 2001
+From: PromptSecura Dev <dev@promptsecura.local>
+Date: Wed, 30 Sep 2026 14:04:54 +0000
+Subject: [PATCH] Implement Phase 3 Chrome extension skeleton
+
+---
+ .gitignore                                 |   1 +
+ README.md                                  |  72 +++++++-
+ extension/build.mjs                        | 153 +++++++++++++++++
+ extension/package.json                     |  23 +++
+ extension/scripts/run-tests.mjs            |  37 ++++
+ extension/src/background/api-client.ts     | 179 +++++++++++++++++++
+ extension/src/background/service-worker.ts | 102 +++++++++++
+ extension/src/content/index.ts             |  47 +++++
+ extension/src/content/sites/adapter.ts     |  64 +++++++
+ extension/src/content/sites/chatgpt.ts     |  49 ++++++
+ extension/src/manifest.json                |  24 +++
+ extension/src/popup/index.html             |  90 ++++++++++
+ extension/src/popup/popup.ts               |  22 +++
+ extension/src/shared/config.ts             |  46 +++++
+ extension/src/shared/log.ts                |  23 +++
+ extension/src/shared/types.ts              | 123 ++++++++++++++
+ extension/test/adapter.test.ts             |  49 ++++++
+ extension/test/api-client.test.ts          | 189 +++++++++++++++++++++
+ extension/test/build-config.test.mjs       |  44 +++++
+ extension/test/node-test.d.ts              |  16 ++
+ extension/tsconfig.json                    |  20 +++
+ progress.md                                |  95 ++++++++++-
+ 22 files changed, 1458 insertions(+), 10 deletions(-)
+ create mode 100644 extension/build.mjs
+ create mode 100644 extension/package.json
+ create mode 100644 extension/scripts/run-tests.mjs
+ create mode 100644 extension/src/background/api-client.ts
+ create mode 100644 extension/src/background/service-worker.ts
+ create mode 100644 extension/src/content/index.ts
+ create mode 100644 extension/src/content/sites/adapter.ts
+ create mode 100644 extension/src/content/sites/chatgpt.ts
+ create mode 100644 extension/src/manifest.json
+ create mode 100644 extension/src/popup/index.html
+ create mode 100644 extension/src/popup/popup.ts
+ create mode 100644 extension/src/shared/config.ts
+ create mode 100644 extension/src/shared/log.ts
+ create mode 100644 extension/src/shared/types.ts
+ create mode 100644 extension/test/adapter.test.ts
+ create mode 100644 extension/test/api-client.test.ts
+ create mode 100644 extension/test/build-config.test.mjs
+ create mode 100644 extension/test/node-test.d.ts
+ create mode 100644 extension/tsconfig.json
+
+diff --git a/.gitignore b/.gitignore
+index cc976b0..e0421b3 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,4 @@ node_modules/
+ dist/
+ *.zip
+ .DS_Store
++.test-dist/
+diff --git a/README.md b/README.md
+index 6b4039d..5277d72 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ PromptSecura checks prompts before they are sent to AI websites. It detects personal data (PII) and prompt-injection/jailbreak attempts, scores the risk, and decides **ALLOW**, **SANITIZE** or **BLOCK**.
+ 
+-**Current status: Phase 2 (PII detection and sanitization), backend only.** There is no Chrome extension yet. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
++**Current status: Phase 3.** The backend analyzes prompts (Phases 1–2). The Chrome extension skeleton is in place (Phase 3), but it **does not check ChatGPT prompts yet**: prompt interception comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
+ 
+ ## Architecture (Phase 1)
+ 
+@@ -148,6 +148,68 @@ All settings are optional environment variables. See [`.env.example`](.env.examp
+ 
+ The rules live in `backend/app/rules/injection_rules.yaml`: regexes with weights and categories. Rules are a baseline. Paraphrased attacks can get through, and some benign prompts can match. Every rule change should come with a test in `backend/tests/test_injection.py`.
+ 
++## Chrome extension (Phase 3 skeleton)
++
++The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling. In this phase:
++
++- The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It exposes an internal message route, but nothing sends prompts to it yet.
++- The **content script** loads on `chatgpt.com` / `chat.openai.com` and selects the site adapter. The **ChatGPT adapter is a placeholder**: it does not read the prompt, change the page, or intercept sending. The content script logs that prompts are not being checked.
++- The **popup** shows the protection status, the supported site (ChatGPT), the configured backend URL, and a backend status placeholder ("Not checked").
++
++### Requirements
++
++Node.js 20 or newer. The Codespace already includes Node 20.
++
++### Install, check and build
++
++```bash
++cd extension
++npm install
++npm run check          # typecheck + unit tests + build
++```
++
++Individual scripts:
++
++| Command | What it does |
++|---|---|
++| `npm run build` | Development build into `extension/dist/` (with source maps) |
++| `npm run build:prod` | Minified build, no source maps |
++| `npm run watch` | Rebuild on file changes |
++| `npm run typecheck` | `tsc --noEmit`, strict mode |
++| `npm test` | Unit tests (esbuild-bundled, Node's built-in test runner) |
++
++### Backend URL (build-time configuration)
++
++The backend URL is set when you **build** the extension, not at runtime:
++
++```bash
++# default: http://localhost:8000
++npm run build
++
++# Codespaces backend (use the forwarded address of port 8000)
++PROMPTSECURA_BACKEND_URL=https://<codespace-name>-8000.app.github.dev npm run build
++```
++
++The build does two things with this URL:
++
++- It injects the URL into the code.
++- It adds the origin to `host_permissions` in `dist/manifest.json`, so the service worker is allowed to call it.
++
++The value must be an origin only (no path), and invalid values fail the build. Set `PROMPTSECURA_DEBUG=true` for debug logging; logs never contain prompt text. **Rebuild after changing either value.**
++
++### Load the extension in Chrome
++
++1. Build it (see above), so that `extension/dist/` exists.
++   If you built inside a Codespace, copy `dist/` to your computer first. With the GitHub CLI: `gh codespace cp -r remote:/workspaces/<repo>/extension/dist ./promptsecura-dist`. Alternatively, clone the repo locally and run `npm install && npm run build` there.
++2. Open `chrome://extensions` in Chrome.
++3. Turn on **Developer mode** (top right).
++4. Click **Load unpacked** and select the `extension/dist` folder, the one that contains `manifest.json`.
++5. Pin PromptSecura from the puzzle-piece menu and click it to open the popup.
++
++After rebuilding, click the **reload** icon on the PromptSecura card in `chrome://extensions`.
++
++To see the content script's status message, open `chatgpt.com` and look at DevTools → Console. You should see: `[PromptSecura] ChatGPT: prompt interception is not implemented in this build; prompts on this site are not being checked.`
++
+ ## Repository layout
+ 
+ ```
+@@ -162,5 +224,13 @@ backend/
+                       redaction, orchestrator, factory (startup assembly)
+     rules/            injection_rules.yaml
+   tests/              pytest suite (doubles.py holds test-only fakes)
++extension/
++  src/manifest.json   MV3 manifest (build adds backend host permission)
++  src/background/     service worker + backend API client
++  src/content/        content script + site adapters (sites/adapter.ts, sites/chatgpt.ts)
++  src/popup/          popup page
++  src/shared/         shared types, build-time config, logger
++  test/               unit tests
++  build.mjs           esbuild build script
+ progress.md           phase status, test results, known limitations
+ ```
+diff --git a/extension/build.mjs b/extension/build.mjs
+new file mode 100644
+index 0000000..6aa9d19
+--- /dev/null
++++ b/extension/build.mjs
+@@ -0,0 +1,153 @@
++// PromptSecura extension build (esbuild).
++//
++//   node build.mjs               development build -> dist/
++//   node build.mjs --production  minified, no source maps
++//   node build.mjs --watch       rebuild on change
++//
++// Configuration (environment variables):
++//   PROMPTSECURA_BACKEND_URL  backend origin, default http://localhost:8000
++//                             e.g. https://<codespace-name>-8000.app.github.dev
++//   PROMPTSECURA_DEBUG        "true" to enable debug logging
++//
++// The backend origin is injected into the code and added to the manifest's
++// host_permissions so the service worker may call it.
++
++import * as esbuild from "esbuild";
++import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++
++const ROOT = path.dirname(fileURLToPath(import.meta.url));
++const SRC = path.join(ROOT, "src");
++const DIST = path.join(ROOT, "dist");
++const DEFAULT_BACKEND_URL = "http://localhost:8000";
++
++/** Validate and normalise the backend URL to a bare origin. Throws on invalid input. */
++export function resolveBackendUrl(raw) {
++  const value = (raw ?? "").trim() || DEFAULT_BACKEND_URL;
++  let url;
++  try {
++    url = new URL(value);
++  } catch {
++    throw new Error(`PROMPTSECURA_BACKEND_URL is not a valid URL: ${JSON.stringify(value)}`);
++  }
++  if (url.protocol !== "http:" && url.protocol !== "https:") {
++    throw new Error("PROMPTSECURA_BACKEND_URL must use http or https");
++  }
++  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
++    throw new Error(
++      "PROMPTSECURA_BACKEND_URL must be an origin only (no path, query or fragment), " +
++        `e.g. https://example-8000.app.github.dev — got ${JSON.stringify(value)}`,
++    );
++  }
++  if (url.username || url.password) {
++    throw new Error("PROMPTSECURA_BACKEND_URL must not contain credentials");
++  }
++  return url.origin;
++}
++
++export function parseDebug(raw) {
++  const value = (raw ?? "").trim().toLowerCase();
++  if (value === "" || value === "false" || value === "0") return false;
++  if (value === "true" || value === "1") return true;
++  throw new Error(`PROMPTSECURA_DEBUG must be true/false, got ${JSON.stringify(raw)}`);
++}
++
++export function buildDefines(backendUrl, debug) {
++  return {
++    __PROMPTSECURA_BACKEND_URL__: JSON.stringify(backendUrl),
++    __PROMPTSECURA_DEBUG__: JSON.stringify(debug),
++  };
++}
++
++async function writeManifest(backendUrl) {
++  const manifest = JSON.parse(await readFile(path.join(SRC, "manifest.json"), "utf8"));
++  const permission = `${backendUrl}/*`;
++  manifest.host_permissions = Array.from(new Set([...(manifest.host_permissions ?? []), permission]));
++  await writeFile(path.join(DIST, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
++  return manifest;
++}
++
++async function copyStatic() {
++  await mkdir(path.join(DIST, "popup"), { recursive: true });
++  await copyFile(path.join(SRC, "popup", "index.html"), path.join(DIST, "popup", "index.html"));
++}
++
++/** Fail the build if the manifest references files that were not produced. */
++async function verifyManifestFiles(manifest) {
++  const files = [
++    manifest.background?.service_worker,
++    manifest.action?.default_popup,
++    ...(manifest.content_scripts ?? []).flatMap((cs) => cs.js ?? []),
++  ].filter(Boolean);
++  for (const file of files) {
++    try {
++      await access(path.join(DIST, file));
++    } catch {
++      throw new Error(`manifest.json references ${file}, but it is missing from dist/`);
++    }
++  }
++}
++
++async function main() {
++  const args = new Set(process.argv.slice(2));
++  const watch = args.has("--watch");
++  const production = args.has("--production");
++
++  const backendUrl = resolveBackendUrl(process.env.PROMPTSECURA_BACKEND_URL);
++  const debug = parseDebug(process.env.PROMPTSECURA_DEBUG);
++
++  await rm(DIST, { recursive: true, force: true });
++  await mkdir(DIST, { recursive: true });
++
++  const common = {
++    bundle: true,
++    platform: "browser",
++    target: ["chrome120"],
++    define: buildDefines(backendUrl, debug),
++    minify: production,
++    sourcemap: production ? false : "linked",
++    legalComments: "none",
++    logLevel: "info",
++    outbase: SRC,
++    outdir: DIST,
++  };
++
++  // Service worker is an ES module ("type": "module" in the manifest);
++  // content scripts and the popup script must be classic scripts (IIFE).
++  const configs = [
++    { ...common, format: "esm", entryPoints: [path.join(SRC, "background", "service-worker.ts")] },
++    {
++      ...common,
++      format: "iife",
++      entryPoints: [path.join(SRC, "content", "index.ts"), path.join(SRC, "popup", "popup.ts")],
++    },
++  ];
++
++  await copyStatic();
++  const manifest = await writeManifest(backendUrl);
++
++  if (watch) {
++    for (const config of configs) {
++      const ctx = await esbuild.context(config);
++      await ctx.watch();
++    }
++    console.log(`Watching for changes (backend: ${backendUrl}). Press Ctrl+C to stop.`);
++    return;
++  }
++
++  await Promise.all(configs.map((config) => esbuild.build(config)));
++  await verifyManifestFiles(manifest);
++  console.log(
++    `Built extension -> ${path.relative(process.cwd(), DIST) || "dist"} ` +
++      `(backend: ${backendUrl}, debug: ${debug}, production: ${production})`,
++  );
++}
++
++// Run only when executed directly, so tests can import the helpers.
++if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  main().catch((err) => {
++    console.error(`Build failed: ${err instanceof Error ? err.message : err}`);
++    process.exit(1);
++  });
++}
+diff --git a/extension/package.json b/extension/package.json
+new file mode 100644
+index 0000000..7efc898
+--- /dev/null
++++ b/extension/package.json
+@@ -0,0 +1,23 @@
++{
++  "name": "promptsecura-extension",
++  "version": "0.1.0",
++  "private": true,
++  "description": "PromptSecura Chrome extension (Manifest V3)",
++  "type": "module",
++  "engines": {
++    "node": ">=20"
++  },
++  "scripts": {
++    "build": "node build.mjs",
++    "build:prod": "node build.mjs --production",
++    "watch": "node build.mjs --watch",
++    "typecheck": "tsc --noEmit -p tsconfig.json",
++    "test": "node scripts/run-tests.mjs",
++    "check": "npm run typecheck && npm test && npm run build"
++  },
++  "devDependencies": {
++    "@types/chrome": ">=0.0.268 <1",
++    "esbuild": "^0.27.7",
++    "typescript": "^6.0.3"
++  }
++}
+diff --git a/extension/scripts/run-tests.mjs b/extension/scripts/run-tests.mjs
+new file mode 100644
+index 0000000..45957d2
+--- /dev/null
++++ b/extension/scripts/run-tests.mjs
+@@ -0,0 +1,37 @@
++// Bundles test/*.test.ts with esbuild (same defines as a real build) and
++// runs them, plus test/*.test.mjs, with Node's built-in test runner.
++import * as esbuild from "esbuild";
++import { spawnSync } from "node:child_process";
++import { readdir, rm } from "node:fs/promises";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++
++import { buildDefines } from "../build.mjs";
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const TEST_DIR = path.join(ROOT, "test");
++const OUT_DIR = path.join(ROOT, ".test-dist");
++
++const entries = await readdir(TEST_DIR);
++const tsTests = entries.filter((f) => f.endsWith(".test.ts")).map((f) => path.join(TEST_DIR, f));
++const mjsTests = entries.filter((f) => f.endsWith(".test.mjs")).map((f) => path.join(TEST_DIR, f));
++
++await rm(OUT_DIR, { recursive: true, force: true });
++await esbuild.build({
++  entryPoints: tsTests,
++  outdir: OUT_DIR,
++  outExtension: { ".js": ".mjs" },
++  bundle: true,
++  platform: "node",
++  format: "esm",
++  target: ["node20"],
++  define: buildDefines("http://backend.test", false),
++  logLevel: "warning",
++});
++
++const bundled = tsTests.map((f) => path.join(OUT_DIR, path.basename(f).replace(/\.ts$/, ".mjs")));
++const result = spawnSync(process.execPath, ["--test", ...bundled, ...mjsTests], {
++  stdio: "inherit",
++});
++await rm(OUT_DIR, { recursive: true, force: true });
++process.exit(result.status ?? 1);
+diff --git a/extension/src/background/api-client.ts b/extension/src/background/api-client.ts
+new file mode 100644
+index 0000000..d4d176b
+--- /dev/null
++++ b/extension/src/background/api-client.ts
+@@ -0,0 +1,179 @@
++/**
++ * Backend API client for POST /api/v1/analyze.
++ *
++ * Runs in the service worker, which has host_permissions for the backend
++ * origin. No chrome.* APIs are used here, so it can be unit-tested with an
++ * injected fetch.
++ *
++ * Fail-closed contract: analyze() never throws and never returns a
++ * decision it did not receive from the backend. Every problem (network,
++ * timeout, non-2xx, malformed body) becomes { ok: false } with the standard
++ * FAIL_CLOSED_MESSAGE.
++ */
++
++import { API_PATHS, FAIL_CLOSED_MESSAGE, REQUEST_TIMEOUT_MS } from "../shared/config";
++import type {
++  AnalysisFailure,
++  AnalysisFailureKind,
++  AnalyzeOutcome,
++  AnalyzeRequest,
++  AnalyzeResponse,
++} from "../shared/types";
++
++export interface ApiClientOptions {
++  baseUrl: string;
++  timeoutMs?: number;
++  fetchImpl?: typeof fetch;
++}
++
++const DECISIONS = new Set(["ALLOW", "SANITIZE", "BLOCK"]);
++const RISK_LEVELS = new Set(["low", "medium", "high"]);
++
++function failure(
++  kind: AnalysisFailureKind,
++  detail: string,
++  status: number | null = null,
++  retryable = true,
++): AnalyzeOutcome {
++  const error: AnalysisFailure = { kind, message: FAIL_CLOSED_MESSAGE, detail, status, retryable };
++  return { ok: false, error };
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === "object" && value !== null && !Array.isArray(value);
++}
++
++function isString(value: unknown): value is string {
++  return typeof value === "string";
++}
++
++function isNumber(value: unknown): value is number {
++  return typeof value === "number" && Number.isFinite(value);
++}
++
++function isRecordOf<T>(value: unknown, check: (v: unknown) => v is T): boolean {
++  return isRecord(value) && Object.values(value).every(check);
++}
++
++/** Runtime check that a backend body matches AnalyzeResponse. */
++export function isAnalyzeResponse(value: unknown): value is AnalyzeResponse {
++  if (!isRecord(value)) return false;
++  const v = value;
++  const breakdown = v["score_breakdown"];
++  return (
++    isString(v["request_id"]) &&
++    isString(v["decision"]) &&
++    DECISIONS.has(v["decision"]) &&
++    isString(v["risk_level"]) &&
++    RISK_LEVELS.has(v["risk_level"]) &&
++    isNumber(v["risk_score"]) &&
++    v["risk_score"] >= 0 &&
++    v["risk_score"] <= 100 &&
++    Array.isArray(v["reasons"]) &&
++    v["reasons"].every(isString) &&
++    Array.isArray(v["pii_entities"]) &&
++    v["pii_entities"].every(
++      (e) =>
++        isRecord(e) &&
++        isString(e["entity_type"]) &&
++        isNumber(e["start"]) &&
++        isNumber(e["end"]) &&
++        isNumber(e["score"]) &&
++        isString(e["placeholder"]) &&
++        isString(e["source"]),
++    ) &&
++    isRecordOf(v["pii_summary"], isNumber) &&
++    Array.isArray(v["injection_matches"]) &&
++    v["injection_matches"].every(
++      (m) =>
++        isRecord(m) &&
++        isString(m["rule_id"]) &&
++        isString(m["category"]) &&
++        isString(m["description"]) &&
++        isNumber(m["weight"]),
++    ) &&
++    isRecord(breakdown) &&
++    isNumber(breakdown["pii"]) &&
++    isNumber(breakdown["injection"]) &&
++    isNumber(breakdown["obfuscation"]) &&
++    isNumber(breakdown["total"]) &&
++    (v["sanitized_prompt"] === null || isString(v["sanitized_prompt"])) &&
++    isNumber(v["latency_ms"]) &&
++    isRecordOf(v["detectors"], isString)
++  );
++}
++
++function errorCode(body: unknown): string {
++  return isRecord(body) && isString(body["error"]) ? body["error"] : "unknown_error";
++}
++
++function isRetryable(status: number, body: unknown): boolean {
++  if (isRecord(body) && typeof body["retryable"] === "boolean") return body["retryable"];
++  return status >= 500;
++}
++
++export class ApiClient {
++  private readonly baseUrl: string;
++  private readonly timeoutMs: number;
++  private readonly fetchImpl: typeof fetch;
++
++  constructor(options: ApiClientOptions) {
++    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
++    this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
++    this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
++  }
++
++  async analyze(request: AnalyzeRequest): Promise<AnalyzeOutcome> {
++    if (typeof request.prompt !== "string" || request.prompt.length === 0) {
++      return failure("invalid_request", "Prompt must be a non-empty string", null, false);
++    }
++
++    const controller = new AbortController();
++    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
++
++    let response: Response;
++    try {
++      response = await this.fetchImpl(this.baseUrl + API_PATHS.analyze, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ prompt: request.prompt, site: request.site }),
++        signal: controller.signal,
++        credentials: "omit",
++        cache: "no-store",
++      });
++    } catch (err) {
++      clearTimeout(timer);
++      if (controller.signal.aborted) {
++        return failure("timeout", `No response within ${this.timeoutMs} ms`);
++      }
++      return failure("network", err instanceof Error ? err.name : "Network request failed");
++    }
++
++    let body: unknown;
++    try {
++      body = await response.json();
++    } catch {
++      if (controller.signal.aborted) {
++        return failure("timeout", `No response within ${this.timeoutMs} ms`);
++      }
++      body = undefined;
++    } finally {
++      clearTimeout(timer);
++    }
++
++    if (!response.ok) {
++      return failure(
++        "http",
++        `HTTP ${response.status}: ${errorCode(body)}`,
++        response.status,
++        isRetryable(response.status, body),
++      );
++    }
++
++    if (!isAnalyzeResponse(body)) {
++      return failure("invalid_response", "Backend response did not match the expected schema");
++    }
++
++    return { ok: true, response: body };
++  }
++}
+diff --git a/extension/src/background/service-worker.ts b/extension/src/background/service-worker.ts
+new file mode 100644
+index 0000000..520d568
+--- /dev/null
++++ b/extension/src/background/service-worker.ts
+@@ -0,0 +1,102 @@
++/**
++ * PromptSecura service worker (Manifest V3 background).
++ *
++ * Responsibilities:
++ *   - Own all backend communication. The service worker has host_permissions
++ *     for the backend origin; content scripts run in the page's context and
++ *     are subject to the page's CORS/CSP rules, so they never call the
++ *     backend directly.
++ *   - Route messages from extension contexts.
++ *
++ * Phase 3 status: the "promptsecura/analyze" route and API client are in
++ * place, but no content script sends prompts to it yet. Prompt interception
++ * on ChatGPT is a later phase.
++ */
++
++import { BACKEND_URL, FAIL_CLOSED_MESSAGE, SUPPORTED_SITES } from "../shared/config";
++import { log } from "../shared/log";
++import type { AnalyzeOutcome, ExtensionMessage } from "../shared/types";
++import { MessageType } from "../shared/types";
++import { ApiClient } from "./api-client";
++
++const apiClient = new ApiClient({ baseUrl: BACKEND_URL });
++const SUPPORTED_SITE_IDS = new Set<string>(SUPPORTED_SITES.map((s) => s.id));
++
++function isExtensionMessage(value: unknown): value is ExtensionMessage {
++  if (typeof value !== "object" || value === null) return false;
++  const message = value as { type?: unknown; payload?: unknown };
++  if (message.type !== MessageType.Analyze) return false;
++  const payload = message.payload as { prompt?: unknown; site?: unknown } | null | undefined;
++  return (
++    typeof payload === "object" &&
++    payload !== null &&
++    typeof payload.prompt === "string" &&
++    typeof payload.site === "string" &&
++    SUPPORTED_SITE_IDS.has(payload.site)
++  );
++}
++
++async function handleMessage(message: ExtensionMessage): Promise<AnalyzeOutcome> {
++  switch (message.type) {
++    case MessageType.Analyze: {
++      const outcome = await apiClient.analyze(message.payload);
++      // Metadata only: never log prompt text or sanitized text.
++      if (outcome.ok) {
++        log.debug("analysis", {
++          request_id: outcome.response.request_id,
++          decision: outcome.response.decision,
++          risk_score: outcome.response.risk_score,
++          latency_ms: outcome.response.latency_ms,
++        });
++      } else {
++        log.warn("analysis failed (fail-closed)", {
++          kind: outcome.error.kind,
++          status: outcome.error.status,
++        });
++      }
++      return outcome;
++    }
++  }
++}
++
++chrome.runtime.onInstalled.addListener((details) => {
++  log.info(`installed (reason: ${details.reason}), backend: ${BACKEND_URL}`);
++});
++
++chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
++  // Only accept messages from this extension's own pages and content scripts.
++  if (sender.id !== chrome.runtime.id) {
++    return false;
++  }
++  if (!isExtensionMessage(message)) {
++    const rejected: AnalyzeOutcome = {
++      ok: false,
++      error: {
++        kind: "invalid_request",
++        message: FAIL_CLOSED_MESSAGE,
++        detail: "Unrecognised or malformed message",
++        status: null,
++        retryable: false,
++      },
++    };
++    sendResponse(rejected);
++    return false;
++  }
++
++  handleMessage(message).then(sendResponse, (err: unknown) => {
++    // ApiClient never throws; this is a last-resort guard that still fails closed.
++    log.error("unexpected error in message handler", err instanceof Error ? err.name : "unknown");
++    const failed: AnalyzeOutcome = {
++      ok: false,
++      error: {
++        kind: "network",
++        message: FAIL_CLOSED_MESSAGE,
++        detail: "Unexpected service worker error",
++        status: null,
++        retryable: true,
++      },
++    };
++    sendResponse(failed);
++  });
++  return true; // keep the message channel open for the async response
++});
+diff --git a/extension/src/content/index.ts b/extension/src/content/index.ts
+new file mode 100644
+index 0000000..4a49ade
+--- /dev/null
++++ b/extension/src/content/index.ts
+@@ -0,0 +1,47 @@
++/**
++ * PromptSecura content script entry point.
++ *
++ * Injected on supported AI sites (see manifest.json content_scripts). It
++ * selects the site adapter for the current page and, in later phases, will
++ * wire adapter submit events -> service worker analysis -> on-page UI.
++ *
++ * Phase 3 status: adapter selection only. No prompt is read, no DOM is
++ * modified, and no submit is intercepted.
++ */
++
++import { log } from "../shared/log";
++import type { SiteAdapter } from "./sites/adapter";
++import { findAdapter } from "./sites/adapter";
++import { ChatGPTAdapter } from "./sites/chatgpt";
++
++/** Registered adapters. Add new sites here. */
++const ADAPTERS: readonly SiteAdapter[] = [new ChatGPTAdapter()];
++
++const INSTANCE_FLAG = "__promptsecuraContentScriptLoaded";
++
++function main(): void {
++  const scope = globalThis as typeof globalThis & Record<string, unknown>;
++  if (scope[INSTANCE_FLAG]) return; // guard against double injection
++  scope[INSTANCE_FLAG] = true;
++
++  const adapter = findAdapter(new URL(window.location.href), ADAPTERS);
++  if (!adapter) {
++    log.debug("no adapter for this page");
++    return;
++  }
++
++  log.debug(`adapter selected: ${adapter.id}`, adapter.capabilities);
++
++  if (!adapter.capabilities.interceptSubmit) {
++    log.info(
++      `${adapter.displayName}: prompt interception is not implemented in this build; ` +
++        "prompts on this site are not being checked.",
++    );
++    return;
++  }
++
++  // Later phase: adapter.onSubmitAttempt(...) -> chrome.runtime.sendMessage(
++  //   { type: MessageType.Analyze, payload: { prompt, site: adapter.id } }) -> UI.
++}
++
++main();
+diff --git a/extension/src/content/sites/adapter.ts b/extension/src/content/sites/adapter.ts
+new file mode 100644
+index 0000000..4abc783
+--- /dev/null
++++ b/extension/src/content/sites/adapter.ts
+@@ -0,0 +1,64 @@
++/**
++ * Site adapter interface.
++ *
++ * Everything site-specific (DOM selectors, how to read/write the prompt
++ * editor, how a submit is triggered) lives behind this interface, so the
++ * content script, UI and service worker stay site-agnostic and new sites are
++ * added as new adapter files.
++ *
++ * Adapters declare what they can actually do via `capabilities`. The content
++ * script must check a capability before relying on it. A placeholder
++ * adapter reports every capability as false.
++ */
++
++import type { SiteId } from "../../shared/types";
++
++export interface AdapterCapabilities {
++  /** Can locate the prompt input and read its current text. */
++  readPrompt: boolean;
++  /** Can replace the prompt text (e.g. with the sanitized prompt). */
++  writePrompt: boolean;
++  /** Can intercept a submit attempt (Enter key / send button) before it happens. */
++  interceptSubmit: boolean;
++}
++
++/** Called when the user tries to submit. Return true to let the submit proceed. */
++export type SubmitHandler = (promptText: string) => Promise<boolean>;
++
++/** Stops a previously registered listener. */
++export type Unsubscribe = () => void;
++
++export interface SiteAdapter {
++  readonly id: SiteId;
++  readonly displayName: string;
++  readonly capabilities: Readonly<AdapterCapabilities>;
++
++  /** True if this adapter handles the given page URL. */
++  matches(url: URL): boolean;
++
++  /** Current prompt text, or null if the input is not found / not supported. */
++  getPromptText(): string | null;
++
++  /** Replace the prompt text. Returns false if not supported or it failed. */
++  setPromptText(text: string): boolean;
++
++  /**
++   * Register a handler for submit attempts. Adapters without the
++   * interceptSubmit capability must not register anything and return a no-op.
++   */
++  onSubmitAttempt(handler: SubmitHandler): Unsubscribe;
++}
++
++/**
++ * Hostname match helper for adapters: exact, case-insensitive host match over
++ * HTTPS only. Kept exact so it agrees with content_scripts.matches.
++ */
++export function hostnameMatches(url: URL, hostnames: readonly string[]): boolean {
++  if (url.protocol !== "https:") return false;
++  const host = url.hostname.toLowerCase();
++  return hostnames.some((h) => host === h.toLowerCase());
++}
++
++export function findAdapter(url: URL, adapters: readonly SiteAdapter[]): SiteAdapter | null {
++  return adapters.find((adapter) => adapter.matches(url)) ?? null;
++}
+diff --git a/extension/src/content/sites/chatgpt.ts b/extension/src/content/sites/chatgpt.ts
+new file mode 100644
+index 0000000..f3f8827
+--- /dev/null
++++ b/extension/src/content/sites/chatgpt.ts
+@@ -0,0 +1,49 @@
++/**
++ * ChatGPT site adapter — PLACEHOLDER (Phase 3).
++ *
++ * This adapter identifies ChatGPT pages but deliberately does NOT touch the
++ * DOM: it cannot read the prompt, write the prompt, or intercept submits,
++ * and it says so through `capabilities`. The real implementation (locating
++ * the prompt editor, reading/writing its text, intercepting Enter and the
++ * send button) is a later phase.
++ */
++
++import { SUPPORTED_SITES, type SupportedSite } from "../../shared/config";
++import type { AdapterCapabilities, SiteAdapter, SubmitHandler, Unsubscribe } from "./adapter";
++import { hostnameMatches } from "./adapter";
++
++function chatgptSite(): SupportedSite {
++  const site = SUPPORTED_SITES.find((s) => s.id === "chatgpt");
++  if (!site) throw new Error("ChatGPT missing from SUPPORTED_SITES");
++  return site;
++}
++
++const CHATGPT = chatgptSite();
++
++const NO_CAPABILITIES: Readonly<AdapterCapabilities> = Object.freeze({
++  readPrompt: false,
++  writePrompt: false,
++  interceptSubmit: false,
++});
++
++export class ChatGPTAdapter implements SiteAdapter {
++  readonly id = CHATGPT.id;
++  readonly displayName = CHATGPT.displayName;
++  readonly capabilities = NO_CAPABILITIES;
++
++  matches(url: URL): boolean {
++    return hostnameMatches(url, CHATGPT.hostnames);
++  }
++
++  getPromptText(): string | null {
++    return null; // not implemented yet
++  }
++
++  setPromptText(_text: string): boolean {
++    return false; // not implemented yet
++  }
++
++  onSubmitAttempt(_handler: SubmitHandler): Unsubscribe {
++    return () => {}; // not implemented yet; registers nothing
++  }
++}
+diff --git a/extension/src/manifest.json b/extension/src/manifest.json
+new file mode 100644
+index 0000000..74dcc52
+--- /dev/null
++++ b/extension/src/manifest.json
+@@ -0,0 +1,24 @@
++{
++  "manifest_version": 3,
++  "name": "PromptSecura",
++  "version": "0.1.0",
++  "description": "Checks prompts for personal data and prompt-injection attempts before they are sent to AI websites.",
++  "minimum_chrome_version": "120",
++  "action": {
++    "default_title": "PromptSecura",
++    "default_popup": "popup/index.html"
++  },
++  "background": {
++    "service_worker": "background/service-worker.js",
++    "type": "module"
++  },
++  "content_scripts": [
++    {
++      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
++      "js": ["content/index.js"],
++      "run_at": "document_idle"
++    }
++  ],
++  "permissions": [],
++  "host_permissions": []
++}
+diff --git a/extension/src/popup/index.html b/extension/src/popup/index.html
+new file mode 100644
+index 0000000..3fa768e
+--- /dev/null
++++ b/extension/src/popup/index.html
+@@ -0,0 +1,90 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1" />
++    <title>PromptSecura</title>
++    <style>
++      :root {
++        --bg: #ffffff;
++        --fg: #1a1d24;
++        --muted: #5b6270;
++        --line: #e4e7ec;
++        --ok: #16803c;
++        --pending: #8a6100;
++        --brand: #14213d;
++      }
++      @media (prefers-color-scheme: dark) {
++        :root {
++          --bg: #16181d;
++          --fg: #eceef2;
++          --muted: #a2a9b6;
++          --line: #2c3039;
++          --ok: #4ade80;
++          --pending: #fbbf24;
++          --brand: #0b1222;
++        }
++      }
++      * { box-sizing: border-box; }
++      body {
++        margin: 0;
++        width: 300px;
++        font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
++        color: var(--fg);
++        background: var(--bg);
++      }
++      header {
++        display: flex;
++        align-items: baseline;
++        justify-content: space-between;
++        padding: 12px 14px;
++        background: var(--brand);
++        color: #fff;
++      }
++      header h1 { margin: 0; font-size: 15px; font-weight: 600; }
++      header span { font-size: 11px; opacity: 0.75; }
++      dl { margin: 0; }
++      .row {
++        display: flex;
++        justify-content: space-between;
++        gap: 12px;
++        padding: 10px 14px;
++        border-bottom: 1px solid var(--line);
++      }
++      dt { color: var(--muted); }
++      dd { margin: 0; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
++      .ok { color: var(--ok); }
++      .pending { color: var(--pending); }
++      .note { margin: 0; padding: 10px 14px; color: var(--muted); font-size: 12px; }
++      code { font-size: 11px; }
++    </style>
++  </head>
++  <body>
++    <header>
++      <h1>PromptSecura</h1>
++      <span id="version"></span>
++    </header>
++    <dl>
++      <div class="row">
++        <dt>Protection status</dt>
++        <dd class="ok" id="protection-status">Active</dd>
++      </div>
++      <div class="row">
++        <dt>Supported site</dt>
++        <dd id="supported-sites"></dd>
++      </div>
++      <div class="row">
++        <dt>Backend</dt>
++        <dd class="pending" id="backend-status">Not checked</dd>
++      </div>
++      <div class="row">
++        <dt>Backend URL</dt>
++        <dd><code id="backend-url"></code></dd>
++      </div>
++    </dl>
++    <p class="note" id="build-note">
++      Prompt checks on ChatGPT are not enabled in this build yet.
++    </p>
++    <script src="popup.js"></script>
++  </body>
++</html>
+diff --git a/extension/src/popup/popup.ts b/extension/src/popup/popup.ts
+new file mode 100644
+index 0000000..5888f01
+--- /dev/null
++++ b/extension/src/popup/popup.ts
+@@ -0,0 +1,22 @@
++/**
++ * Popup script.
++ *
++ * Phase 3: static information only. The backend status is a placeholder
++ * ("Not checked"); a real /health check is a later phase. Nothing here
++ * reports a backend state it has not actually observed.
++ */
++
++import { BACKEND_URL, SUPPORTED_SITES } from "../shared/config";
++
++function setText(id: string, text: string): void {
++  const el = document.getElementById(id);
++  if (el) el.textContent = text;
++}
++
++function render(): void {
++  setText("version", `v${chrome.runtime.getManifest().version}`);
++  setText("supported-sites", SUPPORTED_SITES.map((s) => s.displayName).join(", "));
++  setText("backend-url", BACKEND_URL);
++}
++
++document.addEventListener("DOMContentLoaded", render);
+diff --git a/extension/src/shared/config.ts b/extension/src/shared/config.ts
+new file mode 100644
+index 0000000..57c7383
+--- /dev/null
++++ b/extension/src/shared/config.ts
+@@ -0,0 +1,46 @@
++/**
++ * Extension configuration.
++ *
++ * Values marked "build-time" are injected by build.mjs through esbuild's
++ * `define`, from environment variables:
++ *
++ *   PROMPTSECURA_BACKEND_URL   backend origin (default http://localhost:8000)
++ *   PROMPTSECURA_DEBUG         "true" enables debug logging (default false)
++ *
++ * The backend URL is also added to the manifest's host_permissions at build
++ * time, so the service worker is allowed to call it. Rebuild after changing it.
++ */
++
++import type { SiteId } from "./types";
++
++declare const __PROMPTSECURA_BACKEND_URL__: string;
++declare const __PROMPTSECURA_DEBUG__: boolean;
++
++/** Backend origin without a trailing slash (build-time). */
++export const BACKEND_URL: string = __PROMPTSECURA_BACKEND_URL__;
++
++/** Enables debug logging. Logs never include prompt text (build-time). */
++export const DEBUG: boolean = __PROMPTSECURA_DEBUG__;
++
++export const API_PATHS = {
++  analyze: "/api/v1/analyze",
++  health: "/health",
++} as const;
++
++/** How long to wait for the backend before failing closed. */
++export const REQUEST_TIMEOUT_MS = 10_000;
++
++/** Shown whenever no security decision could be made. Matches the backend. */
++export const FAIL_CLOSED_MESSAGE = "PromptSecura could not complete the security analysis.";
++
++export interface SupportedSite {
++  id: SiteId;
++  displayName: string;
++  /** Hostnames the site adapter is responsible for. */
++  hostnames: readonly string[];
++}
++
++/** Keep hostnames in sync with content_scripts.matches in manifest.json. */
++export const SUPPORTED_SITES: readonly SupportedSite[] = [
++  { id: "chatgpt", displayName: "ChatGPT", hostnames: ["chatgpt.com", "chat.openai.com"] },
++];
+diff --git a/extension/src/shared/log.ts b/extension/src/shared/log.ts
+new file mode 100644
+index 0000000..5dc2e0e
+--- /dev/null
++++ b/extension/src/shared/log.ts
+@@ -0,0 +1,23 @@
++/**
++ * Minimal logger. Callers must pass only metadata (ids, lengths, decisions,
++ * error kinds). Never pass prompt text, sanitized text or PII.
++ */
++
++import { DEBUG } from "./config";
++
++const PREFIX = "[PromptSecura]";
++
++export const log = {
++  debug(...args: unknown[]): void {
++    if (DEBUG) console.debug(PREFIX, ...args);
++  },
++  info(...args: unknown[]): void {
++    console.info(PREFIX, ...args);
++  },
++  warn(...args: unknown[]): void {
++    console.warn(PREFIX, ...args);
++  },
++  error(...args: unknown[]): void {
++    console.error(PREFIX, ...args);
++  },
++};
+diff --git a/extension/src/shared/types.ts b/extension/src/shared/types.ts
+new file mode 100644
+index 0000000..c84d3fe
+--- /dev/null
++++ b/extension/src/shared/types.ts
+@@ -0,0 +1,123 @@
++/**
++ * Shared types for the PromptSecura extension.
++ *
++ * The API types mirror the backend's Pydantic schemas in
++ * backend/app/schemas/analysis.py. Keep them in sync when the API changes.
++ */
++
++// ---------------------------------------------------------------------------
++// Backend API contract
++// ---------------------------------------------------------------------------
++
++/** Sites the backend accepts. Gemini/Claude will be added in later phases. */
++export type SiteId = "chatgpt";
++
++export type Decision = "ALLOW" | "SANITIZE" | "BLOCK";
++
++export type RiskLevel = "low" | "medium" | "high";
++
++export interface AnalyzeRequest {
++  prompt: string;
++  site: SiteId;
++}
++
++export interface PIIEntity {
++  entity_type: string;
++  /** Offset into the backend-normalized prompt, not the raw input. */
++  start: number;
++  end: number;
++  score: number;
++  placeholder: string;
++  source: string;
++}
++
++export interface InjectionMatch {
++  rule_id: string;
++  category: string;
++  description: string;
++  weight: number;
++}
++
++export interface ScoreBreakdown {
++  pii: number;
++  injection: number;
++  obfuscation: number;
++  total: number;
++}
++
++export interface AnalyzeResponse {
++  request_id: string;
++  decision: Decision;
++  risk_level: RiskLevel;
++  risk_score: number;
++  reasons: string[];
++  pii_entities: PIIEntity[];
++  pii_summary: Record<string, number>;
++  injection_matches: InjectionMatch[];
++  score_breakdown: ScoreBreakdown;
++  /**
++   * PII replaced by placeholders; null when no PII was found. Only a
++   * SANITIZE decision means it is safe to send as-is.
++   */
++  sanitized_prompt: string | null;
++  latency_ms: number;
++  detectors: Record<string, string>;
++}
++
++/** Body of backend 413/503/500 responses. */
++export interface ApiErrorBody {
++  error: string;
++  message: string;
++  retryable: boolean;
++}
++
++export type ComponentState = "ready" | "unavailable" | "not_loaded";
++
++export interface HealthResponse {
++  status: "ok" | "degraded";
++  version: string;
++  components: Record<string, ComponentState>;
++  details: Record<string, string>;
++}
++
++// ---------------------------------------------------------------------------
++// Extension-internal results and messages
++// ---------------------------------------------------------------------------
++
++export type AnalysisFailureKind =
++  | "network" // backend unreachable
++  | "timeout" // no response within the configured timeout
++  | "http" // non-2xx from the backend (e.g. 503 fail-closed)
++  | "invalid_response" // 2xx but the body does not match AnalyzeResponse
++  | "invalid_request"; // rejected before sending (e.g. empty prompt)
++
++/**
++ * Any failure means NO security decision was made. Callers must never treat
++ * a failure as ALLOW (fail-closed policy).
++ */
++export interface AnalysisFailure {
++  kind: AnalysisFailureKind;
++  /** User-facing message. */
++  message: string;
++  /** Diagnostic detail. Never contains prompt text. */
++  detail: string;
++  /** HTTP status for kind === "http", otherwise null. */
++  status: number | null;
++  retryable: boolean;
++}
++
++export type AnalyzeOutcome =
++  | { ok: true; response: AnalyzeResponse }
++  | { ok: false; error: AnalysisFailure };
++
++export const MessageType = {
++  Analyze: "promptsecura/analyze",
++} as const;
++
++export interface AnalyzeMessage {
++  type: typeof MessageType.Analyze;
++  payload: AnalyzeRequest;
++}
++
++/** Union of all messages the service worker accepts. */
++export type ExtensionMessage = AnalyzeMessage;
+diff --git a/extension/test/adapter.test.ts b/extension/test/adapter.test.ts
+new file mode 100644
+index 0000000..ec0aae4
+--- /dev/null
++++ b/extension/test/adapter.test.ts
+@@ -0,0 +1,49 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import { findAdapter, hostnameMatches } from "../src/content/sites/adapter";
++import { ChatGPTAdapter } from "../src/content/sites/chatgpt";
++
++const adapter = new ChatGPTAdapter();
++
++test("ChatGPT adapter matches ChatGPT hosts over HTTPS only", () => {
++  assert.ok(adapter.matches(new URL("https://chatgpt.com/")));
++  assert.ok(adapter.matches(new URL("https://chatgpt.com/c/123")));
++  assert.ok(adapter.matches(new URL("https://chat.openai.com/")));
++  assert.ok(adapter.matches(new URL("https://CHATGPT.com/")));
++  assert.equal(adapter.matches(new URL("http://chatgpt.com/")), false);
++  assert.equal(adapter.matches(new URL("https://chatgpt.com.evil.example/")), false);
++  assert.equal(adapter.matches(new URL("https://notchatgpt.com/")), false);
++  assert.equal(adapter.matches(new URL("https://gemini.google.com/")), false);
++});
++
++test("ChatGPT placeholder adapter declares no capabilities and does nothing", () => {
++  assert.equal(adapter.id, "chatgpt");
++  assert.equal(adapter.displayName, "ChatGPT");
++  assert.deepEqual({ ...adapter.capabilities }, {
++    readPrompt: false,
++    writePrompt: false,
++    interceptSubmit: false,
++  });
++  assert.equal(adapter.getPromptText(), null);
++  assert.equal(adapter.setPromptText("x"), false);
++  let called = false;
++  const unsubscribe = adapter.onSubmitAttempt(async () => {
++    called = true;
++    return true;
++  });
++  assert.equal(typeof unsubscribe, "function");
++  unsubscribe();
++  assert.equal(called, false);
++});
++
++test("findAdapter picks the matching adapter or null", () => {
++  assert.equal(findAdapter(new URL("https://chatgpt.com/"), [adapter]), adapter);
++  assert.equal(findAdapter(new URL("https://example.com/"), [adapter]), null);
++  assert.equal(findAdapter(new URL("https://chatgpt.com/"), []), null);
++});
++
++test("hostnameMatches is exact and case-insensitive", () => {
++  assert.ok(hostnameMatches(new URL("https://Example.COM/x"), ["example.com"]));
++  assert.equal(hostnameMatches(new URL("https://sub.example.com/"), ["example.com"]), false);
++});
+diff --git a/extension/test/api-client.test.ts b/extension/test/api-client.test.ts
+new file mode 100644
+index 0000000..069dd72
+--- /dev/null
++++ b/extension/test/api-client.test.ts
+@@ -0,0 +1,189 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import { ApiClient, isAnalyzeResponse } from "../src/background/api-client";
++import { FAIL_CLOSED_MESSAGE } from "../src/shared/config";
++import type { AnalyzeOutcome, AnalyzeResponse } from "../src/shared/types";
++
++/** A response shaped exactly like the backend's AnalyzeResponse. */
++function backendResponse(overrides: Partial<AnalyzeResponse> = {}): AnalyzeResponse {
++  return {
++    request_id: "abc123",
++    decision: "SANITIZE",
++    risk_level: "medium",
++    risk_score: 35,
++    reasons: ["Sensitive information detected: EMAIL_ADDRESS x1"],
++    pii_entities: [
++      {
++        entity_type: "EMAIL_ADDRESS",
++        start: 6,
++        end: 22,
++        score: 1,
++        placeholder: "[EMAIL]",
++        source: "presidio:EmailRecognizer",
++      },
++    ],
++    pii_summary: { EMAIL_ADDRESS: 1 },
++    injection_matches: [],
++    score_breakdown: { pii: 35, injection: 0, obfuscation: 0, total: 35 },
++    sanitized_prompt: "Email [EMAIL] the notes",
++    latency_ms: 12.5,
++    detectors: { pii: "presidio(en_core_web_lg)+contextual-phone", injection: "rules-v1" },
++    ...overrides,
++  };
++}
++
++interface Call {
++  url: string;
++  init: RequestInit | undefined;
++}
++
++function fakeFetch(respond: (call: Call) => Promise<Response>): { fetch: typeof fetch; calls: Call[] } {
++  const calls: Call[] = [];
++  const impl = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
++    const call = { url: String(input), init };
++    calls.push(call);
++    return respond(call);
++  };
++  return { fetch: impl as typeof fetch, calls };
++}
++
++function json(status: number, body: unknown): Promise<Response> {
++  return Promise.resolve(
++    new Response(JSON.stringify(body), {
++      status,
++      headers: { "Content-Type": "application/json" },
++    }),
++  );
++}
++
++function expectFailure(outcome: AnalyzeOutcome) {
++  assert.equal(outcome.ok, false);
++  if (outcome.ok) throw new Error("expected failure");
++  assert.equal(outcome.error.message, FAIL_CLOSED_MESSAGE);
++  return outcome.error;
++}
++
++test("sends a correctly formed POST to /api/v1/analyze", async () => {
++  const { fetch, calls } = fakeFetch(() => json(200, backendResponse()));
++  const client = new ApiClient({ baseUrl: "http://backend.test/", fetchImpl: fetch });
++  await client.analyze({ prompt: "Email a@b.co the notes", site: "chatgpt" });
++
++  assert.equal(calls.length, 1);
++  const call = calls[0]!;
++  assert.equal(call.url, "http://backend.test/api/v1/analyze");
++  assert.equal(call.init?.method, "POST");
++  assert.equal(call.init?.credentials, "omit");
++  assert.deepEqual(JSON.parse(String(call.init?.body)), {
++    prompt: "Email a@b.co the notes",
++    site: "chatgpt",
++  });
++});
++
++test("returns the backend decision unchanged on success", async () => {
++  const body = backendResponse({ decision: "BLOCK", risk_level: "high", risk_score: 100 });
++  const { fetch } = fakeFetch(() => json(200, body));
++  const outcome = await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({
++    prompt: "x",
++    site: "chatgpt",
++  });
++  assert.equal(outcome.ok, true);
++  if (outcome.ok) assert.deepEqual(outcome.response, body);
++});
++
++test("503 from the backend fails closed with retryable from the body", async () => {
++  const { fetch } = fakeFetch(() =>
++    json(503, { error: "analysis_unavailable", message: FAIL_CLOSED_MESSAGE, retryable: true }),
++  );
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "x", site: "chatgpt" }),
++  );
++  assert.equal(error.kind, "http");
++  assert.equal(error.status, 503);
++  assert.equal(error.retryable, true);
++  assert.ok(error.detail.includes("analysis_unavailable"));
++});
++
++test("413 is reported as non-retryable", async () => {
++  const { fetch } = fakeFetch(() =>
++    json(413, { error: "prompt_too_long", message: "too long", retryable: false }),
++  );
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "x", site: "chatgpt" }),
++  );
++  assert.equal(error.status, 413);
++  assert.equal(error.retryable, false);
++});
++
++test("network error fails closed", async () => {
++  const { fetch } = fakeFetch(() => Promise.reject(new TypeError("Failed to fetch")));
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "x", site: "chatgpt" }),
++  );
++  assert.equal(error.kind, "network");
++  assert.equal(error.retryable, true);
++});
++
++test("timeout aborts the request and fails closed", async () => {
++  const { fetch } = fakeFetch(
++    ({ init }) =>
++      new Promise((_resolve, reject) => {
++        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
++      }),
++  );
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch, timeoutMs: 20 }).analyze({
++      prompt: "x",
++      site: "chatgpt",
++    }),
++  );
++  assert.equal(error.kind, "timeout");
++});
++
++test("200 with a malformed body fails closed instead of guessing a decision", async () => {
++  const cases: unknown[] = [
++    { decision: "ALLOW" },
++    backendResponse({ decision: "MAYBE" as never }),
++    backendResponse({ risk_score: 150 }),
++    { ...backendResponse(), pii_summary: { EMAIL_ADDRESS: "1" } },
++    null,
++  ];
++  for (const body of cases) {
++    const { fetch } = fakeFetch(() => json(200, body));
++    const error = expectFailure(
++      await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "x", site: "chatgpt" }),
++    );
++    assert.equal(error.kind, "invalid_response");
++  }
++});
++
++test("200 with non-JSON body fails closed", async () => {
++  const { fetch } = fakeFetch(() => Promise.resolve(new Response("<html>", { status: 200 })));
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "x", site: "chatgpt" }),
++  );
++  assert.equal(error.kind, "invalid_response");
++});
++
++test("empty prompt is rejected without calling the backend", async () => {
++  const { fetch, calls } = fakeFetch(() => json(200, backendResponse()));
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: "", site: "chatgpt" }),
++  );
++  assert.equal(error.kind, "invalid_request");
++  assert.equal(calls.length, 0);
++});
++
++test("failure details never contain the prompt", async () => {
++  const secret = "my card is 4111 1111 1111 1111";
++  const { fetch } = fakeFetch(() => Promise.reject(new Error(secret)));
++  const error = expectFailure(
++    await new ApiClient({ baseUrl: "http://b", fetchImpl: fetch }).analyze({ prompt: secret, site: "chatgpt" }),
++  );
++  assert.ok(!JSON.stringify(error).includes("4111"));
++});
++
++test("isAnalyzeResponse accepts a real-shaped response and null sanitized_prompt", () => {
++  assert.ok(isAnalyzeResponse(backendResponse()));
++  assert.ok(isAnalyzeResponse(backendResponse({ sanitized_prompt: null, pii_entities: [], pii_summary: {} })));
++});
+diff --git a/extension/test/build-config.test.mjs b/extension/test/build-config.test.mjs
+new file mode 100644
+index 0000000..b5d2832
+--- /dev/null
++++ b/extension/test/build-config.test.mjs
+@@ -0,0 +1,44 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import { buildDefines, parseDebug, resolveBackendUrl } from "../build.mjs";
++
++test("backend URL defaults to localhost:8000", () => {
++  assert.equal(resolveBackendUrl(undefined), "http://localhost:8000");
++  assert.equal(resolveBackendUrl("  "), "http://localhost:8000");
++});
++
++test("backend URL is normalised to an origin", () => {
++  assert.equal(
++    resolveBackendUrl("https://my-space-8000.app.github.dev/"),
++    "https://my-space-8000.app.github.dev",
++  );
++  assert.equal(resolveBackendUrl("HTTP://LOCALHOST:8000"), "http://localhost:8000");
++});
++
++test("invalid backend URLs are rejected", () => {
++  for (const bad of [
++    "not a url",
++    "ftp://example.com",
++    "https://example.com/api",
++    "https://example.com/?x=1",
++    "https://user:pw@example.com",
++    "chrome-extension://abc",
++  ]) {
++    assert.throws(() => resolveBackendUrl(bad), undefined, bad);
++  }
++});
++
++test("debug flag parsing", () => {
++  assert.equal(parseDebug(undefined), false);
++  assert.equal(parseDebug("true"), true);
++  assert.equal(parseDebug("0"), false);
++  assert.throws(() => parseDebug("yes please"));
++});
++
++test("defines are JSON literals", () => {
++  assert.deepEqual(buildDefines("http://localhost:8000", false), {
++    __PROMPTSECURA_BACKEND_URL__: '"http://localhost:8000"',
++    __PROMPTSECURA_DEBUG__: "false",
++  });
++});
+diff --git a/extension/test/node-test.d.ts b/extension/test/node-test.d.ts
+new file mode 100644
+index 0000000..7d2ea8e
+--- /dev/null
++++ b/extension/test/node-test.d.ts
+@@ -0,0 +1,16 @@
++// Minimal typings for the Node built-ins used by the tests, so the project
++// does not need @types/node (tests are bundled by esbuild and run by Node).
++declare module "node:test" {
++  export function test(name: string, fn: () => void | Promise<void>): void;
++}
++
++declare module "node:assert/strict" {
++  interface Assert {
++    (value: unknown, message?: string): asserts value;
++    equal(actual: unknown, expected: unknown, message?: string): void;
++    deepEqual(actual: unknown, expected: unknown, message?: string): void;
++    ok(value: unknown, message?: string): asserts value;
++  }
++  const assert: Assert;
++  export default assert;
++}
+diff --git a/extension/tsconfig.json b/extension/tsconfig.json
+new file mode 100644
+index 0000000..f186928
+--- /dev/null
++++ b/extension/tsconfig.json
+@@ -0,0 +1,20 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
++    "types": ["chrome"],
++    "strict": true,
++    "noUncheckedIndexedAccess": true,
++    "noImplicitOverride": true,
++    "noFallthroughCasesInSwitch": true,
++    "exactOptionalPropertyTypes": true,
++    "isolatedModules": true,
++    "verbatimModuleSyntax": true,
++    "forceConsistentCasingInFileNames": true,
++    "skipLibCheck": true,
++    "noEmit": true
++  },
++  "include": ["src/**/*.ts", "test/**/*.ts"]
++}
+diff --git a/progress.md b/progress.md
+index 6789fb0..01490a3 100644
+--- a/progress.md
++++ b/progress.md
+@@ -6,9 +6,10 @@
+ |---|---|---|
+ | 1 | Repo scaffold + backend foundation | Code complete; **Codespaces verification pending** |
+ | 2 | PII detection and sanitization | Code complete; **Codespaces verification pending** |
+-| 3 | To be defined | Not started |
++| 3 | Chrome extension skeleton (MV3, TypeScript, esbuild) | Built and verified in sandbox Chromium; **`npm install` + typecheck with real `@types/chrome` pending** |
++| 4 | To be defined (recommended below) | Not started |
+ 
+-Phase numbering follows the instructions given per phase. The Chrome extension, ChatGPT integration, enforcement UI, popup and extension↔backend auth from the original plan are all still to come.
++Phase numbering follows the instructions given per phase.
+ 
+ ## Decisions log
+ 
+@@ -21,6 +22,10 @@ Phase numbering follows the instructions given per phase. The Chrome extension,
+ - **Phase 2: contextual phone detector** added alongside Presidio. It covers bare numbers like `9876543210`, but only when a phone-related word precedes them.
+ - **Phase 2: spaCy fallback model** (`en_core_web_sm` by default). It is used only if the configured model is not installed, and `/health` reports which one loaded. Missing models are never auto-downloaded at startup.
+ - **Phase 2: `IP_ADDRESS` weight raised from 30 to 35**, so an IP address alone is sanitized rather than allowed.
++- **Phase 3: backend URL is build-time configuration** (`PROMPTSECURA_BACKEND_URL`). The build also adds that origin to `host_permissions`, so the service worker can call it without CORS. Changing it requires a rebuild.
++- **Phase 3: all backend calls go through the service worker**, never the content script, which is subject to the page's CORS/CSP.
++- **Phase 3: adapters declare capabilities.** The ChatGPT placeholder declares none, and the content script checks capabilities before doing anything.
++- **Phase 3: the popup's "Protection status: Active"** is shown as requested, together with a line saying prompt checks on ChatGPT are not enabled in this build yet. The backend status shows "Not checked" rather than a state that was never observed.
+ 
+ ## Implemented
+ 
+@@ -46,11 +51,30 @@ Phase numbering follows the instructions given per phase. The Chrome extension,
+ - **Logs** add PII *types* (e.g. `pii_types=EMAIL_ADDRESS,PHONE_NUMBER`). Prompts, PII values and sanitized text are still never logged. The original prompt exists only in memory for the duration of the request.
+ - **New config:** `PROMPTSECURA_SPACY_MODEL_FALLBACKS`, `PROMPTSECURA_PII_CONTEXTUAL_PHONE`.
+ 
++### Phase 3
++
++- **`extension/` created:**
++  - `src/manifest.json` (MV3)
++  - Service worker with a message router
++  - `api-client.ts`: POST `/api/v1/analyze`, 10 s timeout, runtime validation of the response shape, fail-closed failures that never contain prompt text
++  - Content script with double-injection guard and adapter selection
++  - `SiteAdapter` interface with a capabilities model
++  - ChatGPT placeholder adapter
++  - Popup
++  - Shared types mirroring the backend schema
++  - Build-time config and logger
++- **Tooling:**
++  - `build.mjs` (esbuild): validates configuration, writes the manifest, and verifies that every file the manifest references exists
++  - npm scripts: `build`, `build:prod`, `watch`, `typecheck`, `test`, `check`
++  - Strict `tsconfig.json`
++  - Unit tests
++- **Backend:** unchanged. No compatibility change was needed; the existing CORS regex already allows `chrome-extension://` origins.
++
+ ## Test status
+ 
+ **Total suite: 110 tests.**
+ 
+-### Passed in the authoring sandbox
++### Backend (Phases 1–2) — passed in the authoring sandbox
+ 
+ 83 of 83 tests passed. The sandbox had no network, so real pytest was unavailable. The tests ran through a minimal stdlib harness that provides `pytest.raises` and `tmp_path`.
+ 
+@@ -75,7 +99,7 @@ The Phase 2 behaviour was also mutation-checked. Four injected bugs were each ca
+ 
+ All 29 Python files compile, and the internal imports of the FastAPI/Presidio-dependent files resolve.
+ 
+-### Skipped in the sandbox — must run in Codespaces
++### Backend — skipped in the sandbox, must run in Codespaces
+ 
+ - **`test_api.py` (13 tests)** needs `fastapi` + `httpx`. It covers HTTP responses, the new `pii_summary`/`source`/`details` fields, sanitized prompts on BLOCK, and a caplog check that no PII appears in logs.
+ - **`test_pii_presidio.py` (14 tests)** needs `presidio-analyzer` + a spaCy model. It covers real detection of all six entity types, the exact end-to-end sanitization of the workflow example, and the full HTTP stack with real Presidio.
+@@ -84,6 +108,44 @@ All 29 Python files compile, and the internal imports of the FastAPI/Presidio-de
+ 
+ **Phases 1 and 2 are verified when** `cd backend && python -m pytest` in the Codespace reports **110 passed, 0 skipped**.
+ 
++### Phase 3 — extension
++
++This sandbox cannot reach the npm registry (HTTP 403), so `npm install` could not run. The checks used the locally installed esbuild 0.27.7 and TypeScript 6.0.3, the versions `package.json` requests, symlinked into the gitignored `node_modules/`. `@types/chrome` is not available locally.
++
++| Check | Result |
++|---|---|
++| `npm run build` (development) | **Passed.** `dist/` contains the manifest, service worker (ESM), content script (IIFE), popup HTML/JS and source maps. |
++| `npm run build:prod` with `PROMPTSECURA_BACKEND_URL=https://my-space-8000.app.github.dev/` | **Passed.** The URL is normalized to an origin, `host_permissions` is set to that origin, and there are no source maps. |
++| Invalid `PROMPTSECURA_BACKEND_URL` (with a path) | The build fails with exit code 1 and a clear message, as intended. |
++| `npm run typecheck` as shipped | **FAILED in the sandbox:** `TS2688: Cannot find type definition file for 'chrome'`. The cause is that `@types/chrome` can't be installed without registry access. No other errors were reported, but tsc stops at this one, so this is not proof that the rest is clean. |
++| `tsc` strict, against a sandbox-only stub of the 5 `chrome.runtime` APIs used (signatures copied from `@types/chrome`) | **Passed, 0 errors**, 12 src/test files checked. An injected error (`sender.idd`) was caught. |
++| `npm test` | **20/20 passed:** 11 API client, 4 adapter, 5 build config. |
++| Mutation check on the unit tests | **3/3 injected bugs caught:** non-2xx treated as success, response-schema validation disabled, and the ChatGPT placeholder claiming `interceptSubmit`. |
++| Real Chromium 141 (Playwright, sandbox-only script) — dev build | **21/21 checks passed.** See below. |
++| Real Chromium — production build, Codespaces-style URL | **15/15 checks passed.** The 6 checks that need a localhost fixture server don't apply to a remote URL. |
++| Backend | **0 backend files changed** since Phase 2; 83/83 offline backend tests still pass. |
++
++The real-Chromium checks load `extension/dist` as an unpacked extension. They cover:
++
++- **Install:** the MV3 service worker registers, and the manifest has `manifest_version` 3 and the backend `host_permissions`.
++- **Popup:** it shows PromptSecura, "Active", "ChatGPT", "Not checked", the configured backend URL and the version, with no script errors (CSP-compliant).
++- **Message route:**
++  - Unknown messages and unsupported sites are rejected.
++  - With no backend running, the result is a fail-closed `network` error carrying the standard message.
++- **API client over real HTTP**, against a local **test-fixture server** (not the PromptSecura backend) that sends **no CORS headers**:
++  - A valid response passes through unchanged, which confirms `host_permissions` is sufficient.
++  - The request is `POST /api/v1/analyze` with `{prompt, site}`.
++  - A 503 becomes a retryable `http` failure.
++  - A malformed 200 becomes `invalid_response`.
++  - No failure payload contains the prompt.
++- **Content script:**
++  - On a locally served `https://chatgpt.com/` page (routed; no real network), it logs the placeholder status message and leaves the DOM unchanged.
++  - It is not injected on another site.
++
++Not covered: the real ChatGPT site (no network), and loading the extension in desktop Google Chrome.
++
++**Still to run with real dependencies:** `cd extension && npm install && npm run check`. This is the first real dependency resolution and the first typecheck against the real `@types/chrome`. Commit the generated `package-lock.json` afterwards.
++
+ ## Limitations
+ 
+ - **Presidio has not been run.** Detection quality, recognizer names, and the specific test inputs (e.g. the credit-card format with spaces) are unconfirmed until the Codespace run.
+@@ -94,21 +156,36 @@ All 29 Python files compile, and the internal imports of the FastAPI/Presidio-de
+ - **Placeholders are generic.** Two different emails both become `[EMAIL]`, and the original values cannot be restored.
+ - **Dependency ranges are not pinned** to verified versions yet. Run `pip freeze` after a green Codespace run.
+ - **Rule-based injection detection** limitations are unchanged from Phase 1.
++- **The extension does not protect anything yet.** The ChatGPT adapter is a placeholder; no prompts are read, analyzed or blocked.
++- **No `package-lock.json`** could be generated without registry access. The `@types/chrome` range (`>=0.0.268 <1`) has not been resolved against npm yet.
++- **Backend URL changes need a rebuild.** A runtime setting (popup/options) would require `optional_host_permissions`, which is planned for later.
++- **Codespaces port visibility.** For the extension to reach a Codespaces backend, port 8000 must be **public**, because private ports require a GitHub login. The API has no authentication yet, so keep it private until an auth phase. This does not matter in Phase 3, since nothing calls the backend yet.
++- **No extension icons.** Chrome shows a default icon.
+ 
+ ## Next phase
+ 
+-1. **First, verify Phases 1–2 in Codespaces.** Create the Codespace, then run `cd backend && python -m pytest`. Fix any failures before new work.
+-2. **Phase 3 scope is to be defined by you.** The original plan's next step was the Chrome extension skeleton (MV3 + TypeScript) with read-only ChatGPT analysis and the risk indicator.
++1. **Verify everything with real dependencies first:**
++   - `cd backend && python -m pytest` should give 110 passed, 0 skipped.
++   - `cd extension && npm install && npm run check`.
++2. **Recommended Phase 4: ChatGPT adapter plus read-only analysis and indicator.**
++   - Implement the ChatGPT adapter's `readPrompt` capability: locate the prompt editor and read its text.
++   - On typing (debounced) and on send, send the text to the service worker's `promptsecura/analyze` route.
++   - Show the on-page indicator (analyzing / safe / sanitize / block / "could not complete").
++   - **Do not block sending yet.** This validates the DOM integration and the real network path with low risk.
++3. **Then enforcement:**
++   - Intercept Enter and the send button (`interceptSubmit`) and apply ALLOW/SANITIZE/BLOCK, with fail-closed behaviour on Send.
++   - Write the sanitized prompt back into the editor (`writePrompt`).
+ 
+ ## Deliberately deferred
+ 
+ The following are out of scope so far:
+ 
+-- Chrome extension and ChatGPT integration
+-- Enforcement UI and fail-closed Send handling
+-- Popup, and extension↔backend authentication
++- ChatGPT DOM integration and prompt interception
++- Enforcement UI and fail-closed Send handling (backend and API client already support it)
++- Live backend health check in the popup, and extension↔backend authentication
+ - Dashboard and database
+ - Gemini and Claude support
++- Chrome Web Store packaging
+ - ML / semantic injection detection
+ - Notifications
+ - Production deployment
+-- 
+2.43.0
+
