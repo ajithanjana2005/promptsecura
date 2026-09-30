@@ -1,0 +1,1470 @@
+From 1a97931c9c990f54154f0b3332c5d874f3ba14eb Mon Sep 17 00:00:00 2001
+From: PromptSecura Dev <dev@promptsecura.local>
+Date: Wed, 30 Sep 2026 17:44:07 +0000
+Subject: [PATCH] Implement Phase 4 ChatGPT read-only integration
+
+---
+ README.md                                     |  47 +++-
+ extension/src/content/analysis-controller.ts  | 142 ++++++++++++
+ extension/src/content/index.ts                |  79 +++++--
+ extension/src/content/indicator-state.ts      |  97 ++++++++
+ extension/src/content/indicator.ts            | 143 ++++++++++++
+ extension/src/content/messaging.ts            |  57 +++++
+ extension/src/content/sites/adapter.ts        |  25 +-
+ extension/src/content/sites/chatgpt.ts        | 105 +++++++--
+ extension/src/popup/index.html                |   2 +-
+ extension/src/popup/popup.ts                  |   2 +-
+ extension/src/shared/config.ts                |  13 ++
+ extension/test/adapter.test.ts                |  22 +-
+ extension/test/analysis-controller.test.ts    | 217 ++++++++++++++++++
+ .../test/indicator-and-messaging.test.ts      |  93 ++++++++
+ progress.md                                   |  95 ++++++--
+ 15 files changed, 1079 insertions(+), 60 deletions(-)
+ create mode 100644 extension/src/content/analysis-controller.ts
+ create mode 100644 extension/src/content/indicator-state.ts
+ create mode 100644 extension/src/content/indicator.ts
+ create mode 100644 extension/src/content/messaging.ts
+ create mode 100644 extension/test/analysis-controller.test.ts
+ create mode 100644 extension/test/indicator-and-messaging.test.ts
+
+diff --git a/README.md b/README.md
+index 5277d72..d47944c 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ PromptSecura checks prompts before they are sent to AI websites. It detects personal data (PII) and prompt-injection/jailbreak attempts, scores the risk, and decides **ALLOW**, **SANITIZE** or **BLOCK**.
+ 
+-**Current status: Phase 3.** The backend analyzes prompts (Phases 1–2). The Chrome extension skeleton is in place (Phase 3), but it **does not check ChatGPT prompts yet**: prompt interception comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
++**Current status: Phase 4 (ChatGPT read-only integration).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension analyzes the prompt as you type and shows a risk indicator next to the input (Phases 3–4). It is **read-only**: it never blocks, changes or intercepts sending. Enforcement comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
+ 
+ ## Architecture (Phase 1)
+ 
+@@ -54,7 +54,10 @@ It never returns a partial or "safe" result. The Chrome extension (Phase 3) will
+    ```
+    Interactive API docs are served at `/docs`. In Codespaces, open the **Ports** tab and use the forwarded address for port 8000.
+ 
+-**Port visibility.** Leave port 8000 **private** in Phase 1. The API has no authentication yet. It only needs to be reachable from the browser extension starting in Phase 2, and a shared token is planned before the port is ever made public.
++**Port visibility and the extension.** The Chrome extension runs on your own computer, so it has to reach the backend over the network. A Codespaces port that is **private** requires a GitHub login, which the extension cannot provide, so the indicator will show "Backend Unavailable". There are two options:
++
++- **Recommended while there is no authentication:** run the backend on your own machine (see *Run locally*), and build the extension with the default `http://localhost:8000`.
++- **Use the Codespace:** set port 8000 to **public** in the Ports tab, and build the extension with `PROMPTSECURA_BACKEND_URL=https://<codespace-name>-8000.app.github.dev`. The API has **no authentication yet**, so anyone who knows the URL can call it. Only do this with test prompts, and set the port back to private afterwards.
+ 
+ ## Run locally (optional)
+ 
+@@ -148,14 +151,41 @@ All settings are optional environment variables. See [`.env.example`](.env.examp
+ 
+ The rules live in `backend/app/rules/injection_rules.yaml`: regexes with weights and categories. Rules are a baseline. Paraphrased attacks can get through, and some benign prompts can match. Every rule change should come with a test in `backend/tests/test_injection.py`.
+ 
+-## Chrome extension (Phase 3 skeleton)
++## Chrome extension
+ 
+-The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling. In this phase:
++The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling.
+ 
+-- The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It exposes an internal message route, but nothing sends prompts to it yet.
+-- The **content script** loads on `chatgpt.com` / `chat.openai.com` and selects the site adapter. The **ChatGPT adapter is a placeholder**: it does not read the prompt, change the page, or intercept sending. The content script logs that prompts are not being checked.
++- The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It is the only part that talks to the backend.
++- The **content script** runs on `chatgpt.com` and `chat.openai.com`. It reads the prompt editor as you type or paste, asks the service worker to analyze the text (debounced), and shows a risk indicator next to the input.
+ - The **popup** shows the protection status, the supported site (ChatGPT), the configured backend URL, and a backend status placeholder ("Not checked").
+ 
++### What you see on ChatGPT (read-only)
++
++A small pill labelled "PromptSecura" appears just above the message box while there is text in it:
++
++| Indicator | Meaning |
++|---|---|
++| Analyzing… (grey, pulsing) | The text changed and a check is pending or running. |
++| **Safe** (green) | The backend decided ALLOW. |
++| **Medium Risk** (amber) | The backend decided SANITIZE. It found PII that could be replaced with placeholders. |
++| **High Risk** (red) | The backend decided BLOCK. This includes medium scores that sanitization cannot fix, such as injection text. |
++| **Backend Unavailable** (grey) | No decision could be made: the backend is unreachable, returned an error, or sent an invalid response. The prompt has **not** been checked. |
++| Too Long to Analyze (grey) | The backend refused the prompt as longer than `PROMPTSECURA_MAX_PROMPT_CHARS`. |
++
++Hover over the pill to see the risk score and the backend's reasons. Reasons name the type of finding, such as `EMAIL_ADDRESS` or a rule id, never the text itself. The pill disappears when the message box is empty.
++
++**Sending is not affected.** Enter and the Send button work exactly as they do without the extension, even at High Risk. The extension doesn't listen to key presses, clicks or form submits, and never changes ChatGPT's page. The indicator is drawn in its own isolated element, outside ChatGPT's page structure. Blocking and sanitizing before Send come in the enforcement phase.
++
++**Timing.** Analysis runs 600 ms after you stop typing, or 150 ms after a paste. The editor is also re-checked every second, which catches changes that fire no typing event, such as ChatGPT clearing the box after sending. These values are in `extension/src/shared/config.ts`.
++
++**Privacy.** Prompt text is sent only to the configured PromptSecura backend, through the service worker. It is never logged by the extension or shown in the indicator.
++
++**If the indicator never appears on ChatGPT:**
++
++1. Make sure the backend is running and that the extension was built with the right `PROMPTSECURA_BACKEND_URL`.
++2. In DevTools → Console on chatgpt.com, look for `[PromptSecura] ChatGPT: read-only analysis active`.
++3. If that line appears but typing shows nothing, ChatGPT's page structure has probably changed. The editor selectors live in `EDITOR_SELECTORS` in `extension/src/content/sites/chatgpt.ts`. They were written against ChatGPT's known composer markup (`#prompt-textarea`, a ProseMirror editor), but could not be checked against the live site from the development environment.
++
+ ### Requirements
+ 
+ Node.js 20 or newer. The Codespace already includes Node 20.
+@@ -208,7 +238,7 @@ The value must be an origin only (no path), and invalid values fail the build. S
+ 
+ After rebuilding, click the **reload** icon on the PromptSecura card in `chrome://extensions`.
+ 
+-To see the content script's status message, open `chatgpt.com` and look at DevTools → Console. You should see: `[PromptSecura] ChatGPT: prompt interception is not implemented in this build; prompts on this site are not being checked.`
++To check that it is working, start the backend, open `chatgpt.com` and type in the message box. The PromptSecura indicator should appear above it.
+ 
+ ## Repository layout
+ 
+@@ -227,7 +257,8 @@ backend/
+ extension/
+   src/manifest.json   MV3 manifest (build adds backend host permission)
+   src/background/     service worker + backend API client
+-  src/content/        content script + site adapters (sites/adapter.ts, sites/chatgpt.ts)
++  src/content/        content script: site adapters (sites/), analysis controller,
++                      indicator UI, service-worker messaging
+   src/popup/          popup page
+   src/shared/         shared types, build-time config, logger
+   test/               unit tests
+diff --git a/extension/src/content/analysis-controller.ts b/extension/src/content/analysis-controller.ts
+new file mode 100644
+index 0000000..4fc32b9
+--- /dev/null
++++ b/extension/src/content/analysis-controller.ts
+@@ -0,0 +1,142 @@
++/**
++ * Decides WHEN to analyze the prompt and WHICH result to show.
++ *
++ *  - Debounces typing (TYPING_DEBOUNCE_MS) and pastes (PASTE_DEBOUNCE_MS).
++ *  - Sends only the latest text; a response for text that has since changed
++ *    is discarded (sequence numbers), so the indicator never shows a verdict
++ *    for text that is no longer in the editor.
++ *  - Unchanged text is not re-sent. The result for the most recently analyzed
++ *    text is reused if the user returns to exactly that text.
++ *  - Empty/whitespace-only text shows nothing and sends nothing.
++ *  - analyze() failures (including thrown errors) become "unavailable";
++ *    nothing here can produce "safe" without a backend ALLOW.
++ *
++ * DOM-free and timer-injectable, so it is unit-tested with fake timers.
++ */
++
++import { FAIL_CLOSED_MESSAGE } from "../shared/config";
++import type { AnalyzeOutcome } from "../shared/types";
++import type { InputReason } from "./sites/adapter";
++import { type IndicatorState, sameState, stateFromOutcome } from "./indicator-state";
++
++export type ChangeReason = InputReason | "poll" | "init";
++
++export interface Timers {
++  setTimeout(fn: () => void, ms: number): unknown;
++  clearTimeout(handle: unknown): void;
++}
++
++export interface ControllerOptions {
++  analyze(text: string): Promise<AnalyzeOutcome>;
++  render(state: IndicatorState): void;
++  typingDebounceMs: number;
++  pasteDebounceMs: number;
++  timers?: Timers;
++}
++
++const defaultTimers: Timers = {
++  setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
++  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
++};
++
++export class AnalysisController {
++  private readonly opts: ControllerOptions;
++  private readonly timers: Timers;
++  private lastSeenText = "";
++  private pending: unknown = null;
++  private sequence = 0;
++  private lastResult: { text: string; state: IndicatorState } | null = null;
++  private current: IndicatorState = { kind: "idle" };
++  private disposed = false;
++
++  constructor(options: ControllerOptions) {
++    this.opts = options;
++    this.timers = options.timers ?? defaultTimers;
++  }
++
++  get state(): IndicatorState {
++    return this.current;
++  }
++
++  /** Report the editor's current text. `null` means no editor on the page. */
++  onTextChanged(text: string | null, reason: ChangeReason): void {
++    if (this.disposed) return;
++    const value = text ?? "";
++
++    if (value === this.lastSeenText) {
++      // A paste often also fires an input event with the same text; make sure
++      // the shorter paste delay wins if a request is still pending.
++      if (reason === "paste" && this.pending !== null) this.schedule(value, this.opts.pasteDebounceMs);
++      return;
++    }
++    this.lastSeenText = value;
++    this.cancelPending();
++
++    if (value.trim() === "") {
++      this.sequence++; // invalidate any in-flight request
++      this.setState({ kind: "idle" });
++      return;
++    }
++
++    if (this.lastResult && this.lastResult.text === value) {
++      this.sequence++;
++      this.setState(this.lastResult.state);
++      return;
++    }
++
++    this.setState({ kind: "analyzing" });
++    const delay = reason === "paste" ? this.opts.pasteDebounceMs : this.opts.typingDebounceMs;
++    this.schedule(value, delay);
++  }
++
++  dispose(): void {
++    this.disposed = true;
++    this.cancelPending();
++    this.sequence++;
++  }
++
++  private schedule(text: string, delay: number): void {
++    this.cancelPending();
++    this.pending = this.timers.setTimeout(() => {
++      this.pending = null;
++      void this.run(text);
++    }, delay);
++  }
++
++  private cancelPending(): void {
++    if (this.pending !== null) {
++      this.timers.clearTimeout(this.pending);
++      this.pending = null;
++    }
++  }
++
++  private async run(text: string): Promise<void> {
++    const seq = ++this.sequence;
++    let outcome: AnalyzeOutcome;
++    try {
++      outcome = await this.opts.analyze(text);
++    } catch {
++      outcome = {
++        ok: false,
++        error: {
++          kind: "network",
++          message: FAIL_CLOSED_MESSAGE,
++          detail: "Unexpected error",
++          status: null,
++          retryable: true,
++        },
++      };
++    }
++    if (this.disposed || seq !== this.sequence) return; // stale: text changed since
++    const state = stateFromOutcome(outcome);
++    // Cache only real verdicts; failures should be retried on the next change.
++    this.lastResult = state.kind === "unavailable" ? null : { text, state };
++    this.setState(state);
++  }
++
++  private setState(state: IndicatorState): void {
++    if (sameState(state, this.current)) return;
++    this.current = state;
++    this.opts.render(state);
++  }
++}
+diff --git a/extension/src/content/index.ts b/extension/src/content/index.ts
+index 4a49ade..df75e46 100644
+--- a/extension/src/content/index.ts
++++ b/extension/src/content/index.ts
+@@ -1,15 +1,28 @@
+ /**
+  * PromptSecura content script entry point.
+  *
+- * Injected on supported AI sites (see manifest.json content_scripts). It
+- * selects the site adapter for the current page and, in later phases, will
+- * wire adapter submit events -> service worker analysis -> on-page UI.
++ * Phase 4 (read-only): on a supported site, observe the prompt editor,
++ * analyze its text through the service worker (debounced), and show the risk
++ * indicator next to the composer.
+  *
+- * Phase 3 status: adapter selection only. No prompt is read, no DOM is
+- * modified, and no submit is intercepted.
++ * Read-only guarantee: nothing here blocks, delays, alters or intercepts
++ * sending. The site's Enter key and send button behave exactly as without
++ * the extension. Enforcement is a later phase and requires an adapter with
++ * the interceptSubmit capability.
++ *
++ * Privacy: prompt text goes only to the service worker (and from there to the
++ * configured PromptSecura backend). It is never logged or shown on the page.
+  */
+ 
++import {
++  EDITOR_POLL_MS,
++  PASTE_DEBOUNCE_MS,
++  TYPING_DEBOUNCE_MS,
++} from "../shared/config";
+ import { log } from "../shared/log";
++import { AnalysisController } from "./analysis-controller";
++import { RiskIndicator } from "./indicator";
++import { createAnalyzer } from "./messaging";
+ import type { SiteAdapter } from "./sites/adapter";
+ import { findAdapter } from "./sites/adapter";
+ import { ChatGPTAdapter } from "./sites/chatgpt";
+@@ -19,6 +32,48 @@ const ADAPTERS: readonly SiteAdapter[] = [new ChatGPTAdapter()];
+ 
+ const INSTANCE_FLAG = "__promptsecuraContentScriptLoaded";
+ 
++function start(adapter: SiteAdapter): void {
++  const indicator = new RiskIndicator(document);
++  const reposition = (): void => indicator.position(adapter.getIndicatorAnchor());
++
++  const controller = new AnalysisController({
++    analyze: createAnalyzer(adapter.id, (message) => chrome.runtime.sendMessage(message)),
++    render: (state) => {
++      indicator.render(state);
++      reposition();
++      log.debug("indicator state", state.kind); // state only, never text
++    },
++    typingDebounceMs: TYPING_DEBOUNCE_MS,
++    pasteDebounceMs: PASTE_DEBOUNCE_MS,
++  });
++
++  // Typing and paste (passive listeners registered by the adapter).
++  adapter.observeInput((reason) => {
++    if (reason === "paste") {
++      // The pasted text is inserted after the paste event; read it afterwards.
++      setTimeout(() => controller.onTextChanged(adapter.getPromptText(), "paste"), 0);
++    } else {
++      controller.onTextChanged(adapter.getPromptText(), "input");
++    }
++  });
++
++  // Poll: catches changes without input events (editor cleared after Send,
++  // new chat, restored drafts) and keeps the indicator next to the composer.
++  setInterval(() => {
++    controller.onTextChanged(adapter.getPromptText(), "poll");
++    reposition();
++  }, EDITOR_POLL_MS);
++
++  window.addEventListener("resize", reposition, { passive: true });
++  window.addEventListener("scroll", reposition, { passive: true, capture: true });
++
++  controller.onTextChanged(adapter.getPromptText(), "init");
++  log.info(
++    `${adapter.displayName}: read-only analysis active. ` +
++      "Prompts are checked as you type; sending is not blocked or modified.",
++  );
++}
++
+ function main(): void {
+   const scope = globalThis as typeof globalThis & Record<string, unknown>;
+   if (scope[INSTANCE_FLAG]) return; // guard against double injection
+@@ -29,19 +84,11 @@ function main(): void {
+     log.debug("no adapter for this page");
+     return;
+   }
+-
+-  log.debug(`adapter selected: ${adapter.id}`, adapter.capabilities);
+-
+-  if (!adapter.capabilities.interceptSubmit) {
+-    log.info(
+-      `${adapter.displayName}: prompt interception is not implemented in this build; ` +
+-        "prompts on this site are not being checked.",
+-    );
++  if (!adapter.capabilities.readPrompt || !adapter.capabilities.observeInput) {
++    log.info(`${adapter.displayName}: prompt analysis is not supported by this adapter.`);
+     return;
+   }
+-
+-  // Later phase: adapter.onSubmitAttempt(...) -> chrome.runtime.sendMessage(
+-  //   { type: MessageType.Analyze, payload: { prompt, site: adapter.id } }) -> UI.
++  start(adapter);
+ }
+ 
+ main();
+diff --git a/extension/src/content/indicator-state.ts b/extension/src/content/indicator-state.ts
+new file mode 100644
+index 0000000..cd553e3
+--- /dev/null
++++ b/extension/src/content/indicator-state.ts
+@@ -0,0 +1,97 @@
++/**
++ * Indicator states and the mapping from a backend outcome to a state.
++ *
++ * DOM-free so it can be unit-tested. The mapping follows the backend's
++ * DECISION (not just its risk level), because the decision is what the
++ * enforcement phase will act on:
++ *
++ *   ALLOW    -> Safe
++ *   SANITIZE -> Medium Risk
++ *   BLOCK    -> High Risk   (includes medium scores escalated to BLOCK)
++ *   failure  -> Backend Unavailable (fail-closed: never shown as Safe)
++ */
++
++import type { AnalyzeOutcome, Decision } from "../shared/types";
++
++export type IndicatorState =
++  | { kind: "idle" }
++  | { kind: "analyzing" }
++  | {
++      kind: "safe" | "medium" | "high";
++      decision: Decision;
++      riskScore: number;
++      reasons: readonly string[];
++    }
++  | { kind: "unavailable"; label: string; detail: string };
++
++export const LABELS = {
++  analyzing: "Analyzing…",
++  safe: "Safe",
++  medium: "Medium Risk",
++  high: "High Risk",
++  unavailable: "Backend Unavailable",
++  tooLong: "Too Long to Analyze",
++} as const;
++
++const KIND_BY_DECISION: Record<Decision, "safe" | "medium" | "high"> = {
++  ALLOW: "safe",
++  SANITIZE: "medium",
++  BLOCK: "high",
++};
++
++export function stateFromOutcome(outcome: AnalyzeOutcome): IndicatorState {
++  if (outcome.ok) {
++    const r = outcome.response;
++    return {
++      kind: KIND_BY_DECISION[r.decision],
++      decision: r.decision,
++      riskScore: r.risk_score,
++      reasons: r.reasons,
++    };
++  }
++  const e = outcome.error;
++  // 413 means the backend is up but refused the input; say so accurately.
++  const label = e.kind === "http" && e.status === 413 ? LABELS.tooLong : LABELS.unavailable;
++  return { kind: "unavailable", label, detail: `${e.message} (${e.detail})` };
++}
++
++export function labelFor(state: IndicatorState): string {
++  switch (state.kind) {
++    case "idle":
++      return "";
++    case "analyzing":
++      return LABELS.analyzing;
++    case "safe":
++      return LABELS.safe;
++    case "medium":
++      return LABELS.medium;
++    case "high":
++      return LABELS.high;
++    case "unavailable":
++      return state.label;
++  }
++}
++
++/** Tooltip text. Contains no prompt text: backend reasons name types/rules only. */
++export function tooltipFor(state: IndicatorState): string {
++  switch (state.kind) {
++    case "idle":
++      return "";
++    case "analyzing":
++      return "PromptSecura is checking this prompt.";
++    case "safe":
++    case "medium":
++    case "high": {
++      const lines = [`PromptSecura: ${labelFor(state)} (risk ${state.riskScore}/100)`];
++      for (const reason of state.reasons) lines.push(`• ${reason}`);
++      lines.push("Read-only: sending is not blocked in this version.");
++      return lines.join("\n");
++    }
++    case "unavailable":
++      return `PromptSecura: ${state.detail}\nThis prompt has not been checked.`;
++  }
++}
++
++export function sameState(a: IndicatorState, b: IndicatorState): boolean {
++  return JSON.stringify(a) === JSON.stringify(b);
++}
+diff --git a/extension/src/content/indicator.ts b/extension/src/content/indicator.ts
+new file mode 100644
+index 0000000..22179ca
+--- /dev/null
++++ b/extension/src/content/indicator.ts
+@@ -0,0 +1,143 @@
++/**
++ * The on-page risk indicator.
++ *
++ * Rendered in its own Shadow DOM, on a host element appended to <html>
++ * (outside ChatGPT's React-managed tree), and positioned with fixed
++ * coordinates next to the composer. It never inserts anything into the site's
++ * DOM tree, so it cannot disturb the site's rendering, styles or Send.
++ *
++ * It never displays prompt text: only a label, the risk score, and backend
++ * reasons (which name entity types/rules, not values) in the tooltip.
++ */
++
++import { type IndicatorState, labelFor, tooltipFor } from "./indicator-state";
++
++export const HOST_ID = "promptsecura-indicator-host";
++const GAP_PX = 6;
++
++const STYLE = `
++:host { all: initial; }
++.pill {
++  position: fixed;
++  z-index: 2147483000;
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  padding: 3px 9px 3px 7px;
++  border-radius: 999px;
++  font: 600 11.5px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
++  color: #1a1d24;
++  background: #ffffff;
++  border: 1px solid #d9dde3;
++  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
++  white-space: nowrap;
++  cursor: default;
++  user-select: none;
++}
++.pill[hidden] { display: none; }
++.pill.dark { color: #eceef2; background: #22252b; border-color: #3a3f48; }
++.dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa1ad; flex: none; }
++.brand { font-weight: 500; opacity: 0.7; }
++.score { font-weight: 500; opacity: 0.75; }
++.analyzing .dot { background: #9aa1ad; animation: pulse 1s ease-in-out infinite; }
++.safe .dot { background: #16a34a; }
++.medium .dot { background: #d97706; }
++.high .dot { background: #dc2626; }
++.unavailable .dot { background: #6b7280; box-shadow: inset 0 0 0 2px #fff; outline: 1px solid #6b7280; }
++@keyframes pulse { 50% { opacity: 0.35; } }
++@media (prefers-reduced-motion: reduce) { .analyzing .dot { animation: none; } }
++`;
++
++export class RiskIndicator {
++  private readonly doc: Document;
++  private host: HTMLElement | null = null;
++  private pill: HTMLElement | null = null;
++  private label: HTMLElement | null = null;
++  private score: HTMLElement | null = null;
++  private state: IndicatorState = { kind: "idle" };
++
++  constructor(doc: Document = document) {
++    this.doc = doc;
++  }
++
++  private ensureMounted(): void {
++    if (this.host?.isConnected) return;
++    const host = this.doc.createElement("div");
++    host.id = HOST_ID;
++    const root = host.attachShadow({ mode: "open" });
++
++    const style = this.doc.createElement("style");
++    style.textContent = STYLE;
++
++    const pill = this.doc.createElement("div");
++    pill.className = "pill";
++    pill.hidden = true;
++    pill.setAttribute("role", "status");
++    pill.setAttribute("aria-live", "polite");
++
++    const dot = this.doc.createElement("span");
++    dot.className = "dot";
++    const brand = this.doc.createElement("span");
++    brand.className = "brand";
++    brand.textContent = "PromptSecura";
++    const label = this.doc.createElement("span");
++    label.className = "label";
++    const score = this.doc.createElement("span");
++    score.className = "score";
++
++    pill.append(dot, brand, label, score);
++    root.append(style, pill);
++    this.doc.documentElement.append(host);
++
++    this.host = host;
++    this.pill = pill;
++    this.label = label;
++    this.score = score;
++  }
++
++  render(state: IndicatorState): void {
++    this.state = state;
++    this.ensureMounted();
++    const pill = this.pill!;
++    pill.className = `pill ${state.kind}${this.isDarkTheme() ? " dark" : ""}`;
++    pill.dataset["state"] = state.kind;
++    this.label!.textContent = labelFor(state);
++    this.score!.textContent =
++      state.kind === "safe" || state.kind === "medium" || state.kind === "high"
++        ? `${state.riskScore}/100`
++        : "";
++    pill.title = tooltipFor(state);
++  }
++
++  /** Place the indicator above the anchor's top-right corner (below if no room). */
++  position(anchor: HTMLElement | null): void {
++    if (!this.pill) return;
++    const pill = this.pill;
++    const rect = anchor?.getBoundingClientRect();
++    if (this.state.kind === "idle" || !rect || rect.width === 0 || rect.height === 0) {
++      pill.hidden = true;
++      return;
++    }
++    pill.hidden = false;
++    const width = pill.offsetWidth;
++    const height = pill.offsetHeight;
++    const viewportWidth = this.doc.documentElement.clientWidth;
++    let top = rect.top - height - GAP_PX;
++    if (top < GAP_PX) top = rect.bottom + GAP_PX;
++    const left = Math.max(GAP_PX, Math.min(rect.right - width, viewportWidth - width - GAP_PX));
++    pill.style.top = `${Math.round(top)}px`;
++    pill.style.left = `${Math.round(left)}px`;
++  }
++
++  destroy(): void {
++    this.host?.remove();
++    this.host = this.pill = this.label = this.score = null;
++  }
++
++  private isDarkTheme(): boolean {
++    const html = this.doc.documentElement;
++    if (html.classList.contains("dark")) return true;
++    if (html.classList.contains("light")) return false;
++    return this.doc.defaultView?.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
++  }
++}
+diff --git a/extension/src/content/messaging.ts b/extension/src/content/messaging.ts
+new file mode 100644
+index 0000000..5d7959a
+--- /dev/null
++++ b/extension/src/content/messaging.ts
+@@ -0,0 +1,57 @@
++/**
++ * Content script -> service worker bridge for analysis requests.
++ *
++ * The content script never calls the backend itself; the service worker
++ * (which has host_permissions for the backend) does, via the existing
++ * ApiClient. Any messaging problem — e.g. "Extension context invalidated"
++ * after the extension is reloaded, or a malformed reply — becomes a
++ * fail-closed failure, never a verdict.
++ */
++
++import { isAnalyzeResponse } from "../background/api-client";
++import { FAIL_CLOSED_MESSAGE } from "../shared/config";
++import type { AnalysisFailure, AnalyzeMessage, AnalyzeOutcome, SiteId } from "../shared/types";
++import { MessageType } from "../shared/types";
++
++function failure(detail: string): AnalyzeOutcome {
++  return {
++    ok: false,
++    error: { kind: "network", message: FAIL_CLOSED_MESSAGE, detail, status: null, retryable: true },
++  };
++}
++
++function isFailure(value: unknown): value is AnalysisFailure {
++  if (typeof value !== "object" || value === null) return false;
++  const v = value as Record<string, unknown>;
++  return (
++    typeof v["kind"] === "string" &&
++    typeof v["message"] === "string" &&
++    typeof v["detail"] === "string" &&
++    (v["status"] === null || typeof v["status"] === "number") &&
++    typeof v["retryable"] === "boolean"
++  );
++}
++
++/** Runtime check of a service-worker reply. */
++export function isAnalyzeOutcome(value: unknown): value is AnalyzeOutcome {
++  if (typeof value !== "object" || value === null) return false;
++  const v = value as Record<string, unknown>;
++  if (v["ok"] === true) return isAnalyzeResponse(v["response"]);
++  if (v["ok"] === false) return isFailure(v["error"]);
++  return false;
++}
++
++export type SendMessage = (message: AnalyzeMessage) => Promise<unknown>;
++
++export function createAnalyzer(site: SiteId, sendMessage: SendMessage) {
++  return async function analyze(prompt: string): Promise<AnalyzeOutcome> {
++    const message: AnalyzeMessage = { type: MessageType.Analyze, payload: { prompt, site } };
++    let reply: unknown;
++    try {
++      reply = await sendMessage(message);
++    } catch {
++      return failure("Could not reach the PromptSecura service worker (reload the page)");
++    }
++    return isAnalyzeOutcome(reply) ? reply : failure("Malformed reply from the service worker");
++  };
++}
+diff --git a/extension/src/content/sites/adapter.ts b/extension/src/content/sites/adapter.ts
+index 4abc783..d22e816 100644
+--- a/extension/src/content/sites/adapter.ts
++++ b/extension/src/content/sites/adapter.ts
+@@ -7,8 +7,7 @@
+  * added as new adapter files.
+  *
+  * Adapters declare what they can actually do via `capabilities`. The content
+- * script must check a capability before relying on it. A placeholder
+- * adapter reports every capability as false.
++ * script must check a capability before relying on it.
+  */
+ 
+ import type { SiteId } from "../../shared/types";
+@@ -16,12 +15,17 @@ import type { SiteId } from "../../shared/types";
+ export interface AdapterCapabilities {
+   /** Can locate the prompt input and read its current text. */
+   readPrompt: boolean;
++  /** Can report typing/paste in the prompt input (passively, without blocking anything). */
++  observeInput: boolean;
+   /** Can replace the prompt text (e.g. with the sanitized prompt). */
+   writePrompt: boolean;
+   /** Can intercept a submit attempt (Enter key / send button) before it happens. */
+   interceptSubmit: boolean;
+ }
+ 
++/** Why the prompt text may have changed. */
++export type InputReason = "input" | "paste";
++
+ /** Called when the user tries to submit. Return true to let the submit proceed. */
+ export type SubmitHandler = (promptText: string) => Promise<boolean>;
+ 
+@@ -36,9 +40,26 @@ export interface SiteAdapter {
+   /** True if this adapter handles the given page URL. */
+   matches(url: URL): boolean;
+ 
++  /** The prompt editor element currently on the page, or null if not found. */
++  findEditor(): HTMLElement | null;
++
+   /** Current prompt text, or null if the input is not found / not supported. */
+   getPromptText(): string | null;
+ 
++  /**
++   * Element the risk indicator should be positioned next to (e.g. the
++   * composer), or null if none is on the page.
++   */
++  getIndicatorAnchor(): HTMLElement | null;
++
++  /**
++   * Notify `listener` when the user types or pastes into the prompt input.
++   * Listeners must be passive: they must never cancel, delay or alter the
++   * site's own handling of the event. Adapters without the observeInput
++   * capability must not register anything and return a no-op.
++   */
++  observeInput(listener: (reason: InputReason) => void): Unsubscribe;
++
+   /** Replace the prompt text. Returns false if not supported or it failed. */
+   setPromptText(text: string): boolean;
+ 
+diff --git a/extension/src/content/sites/chatgpt.ts b/extension/src/content/sites/chatgpt.ts
+index f3f8827..8e95423 100644
+--- a/extension/src/content/sites/chatgpt.ts
++++ b/extension/src/content/sites/chatgpt.ts
+@@ -1,15 +1,34 @@
+ /**
+- * ChatGPT site adapter — PLACEHOLDER (Phase 3).
++ * ChatGPT site adapter — READ-ONLY (Phase 4).
+  *
+- * This adapter identifies ChatGPT pages but deliberately does NOT touch the
+- * DOM: it cannot read the prompt, write the prompt, or intercept submits,
+- * and it says so through `capabilities`. The real implementation (locating
+- * the prompt editor, reading/writing its text, intercepting Enter and the
+- * send button) is a later phase.
++ * Can:     find the prompt editor, read its text, observe typing/paste.
++ * Cannot:  write the prompt or intercept submits (enforcement is a later
++ *          phase); those capabilities are declared false and the methods are
++ *          inert.
++ *
++ * Non-interference guarantees:
++ *   - Only `input` and `paste` listeners are registered, on `document`, in the
++ *     capture phase, as passive listeners. They never call preventDefault(),
++ *     stopPropagation() or modify the event.
++ *   - No keydown, submit or click listeners: ChatGPT's Send (Enter key and
++ *     send button) is completely unaffected.
++ *   - The adapter never writes to ChatGPT's DOM.
++ *
++ * DOM assumptions: ChatGPT's composer is a ProseMirror contenteditable with
++ * id="prompt-textarea" (older builds used a <textarea> with that id), plus a
++ * hidden fallback <textarea>. These selectors were NOT verified against the
++ * live site from the development environment; if ChatGPT changes its markup,
++ * update EDITOR_SELECTORS below.
+  */
+ 
+ import { SUPPORTED_SITES, type SupportedSite } from "../../shared/config";
+-import type { AdapterCapabilities, SiteAdapter, SubmitHandler, Unsubscribe } from "./adapter";
++import type {
++  AdapterCapabilities,
++  InputReason,
++  SiteAdapter,
++  SubmitHandler,
++  Unsubscribe,
++} from "./adapter";
+ import { hostnameMatches } from "./adapter";
+ 
+ function chatgptSite(): SupportedSite {
+@@ -20,30 +39,90 @@ function chatgptSite(): SupportedSite {
+ 
+ const CHATGPT = chatgptSite();
+ 
+-const NO_CAPABILITIES: Readonly<AdapterCapabilities> = Object.freeze({
+-  readPrompt: false,
++/** Tried in order; the first visible match is the editor. */
++export const EDITOR_SELECTORS: readonly string[] = [
++  '#prompt-textarea[contenteditable="true"]',
++  'div.ProseMirror[contenteditable="true"]',
++  "textarea#prompt-textarea",
++];
++
++const CAPABILITIES: Readonly<AdapterCapabilities> = Object.freeze({
++  readPrompt: true,
++  observeInput: true,
+   writePrompt: false,
+   interceptSubmit: false,
+ });
+ 
++function isVisible(el: HTMLElement): boolean {
++  return el.isConnected && el.getClientRects().length > 0;
++}
++
++/** Text of a textarea/input, or the rendered text of a contenteditable. */
++export function readEditorText(el: HTMLElement): string {
++  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
++    return el.value;
++  }
++  return el.innerText ?? el.textContent ?? "";
++}
++
+ export class ChatGPTAdapter implements SiteAdapter {
+   readonly id = CHATGPT.id;
+   readonly displayName = CHATGPT.displayName;
+-  readonly capabilities = NO_CAPABILITIES;
++  readonly capabilities = CAPABILITIES;
+ 
+   matches(url: URL): boolean {
+     return hostnameMatches(url, CHATGPT.hostnames);
+   }
+ 
++  findEditor(): HTMLElement | null {
++    if (typeof document === "undefined") return null;
++    for (const selector of EDITOR_SELECTORS) {
++      for (const el of document.querySelectorAll<HTMLElement>(selector)) {
++        if (isVisible(el)) return el;
++      }
++    }
++    return null;
++  }
++
+   getPromptText(): string | null {
+-    return null; // not implemented yet
++    const editor = this.findEditor();
++    return editor ? readEditorText(editor) : null;
++  }
++
++  getIndicatorAnchor(): HTMLElement | null {
++    const editor = this.findEditor();
++    if (!editor) return null;
++    return editor.closest<HTMLElement>("form") ?? editor;
++  }
++
++  observeInput(listener: (reason: InputReason) => void): Unsubscribe {
++    if (typeof document === "undefined") return () => {};
++
++    const isInEditor = (target: EventTarget | null): boolean => {
++      const editor = this.findEditor();
++      return !!editor && target instanceof Node && editor.contains(target);
++    };
++    const onInput = (event: Event): void => {
++      if (isInEditor(event.target)) listener("input");
++    };
++    const onPaste = (event: Event): void => {
++      if (isInEditor(event.target)) listener("paste");
++    };
++
++    const options: AddEventListenerOptions = { capture: true, passive: true };
++    document.addEventListener("input", onInput, options);
++    document.addEventListener("paste", onPaste, options);
++    return () => {
++      document.removeEventListener("input", onInput, options);
++      document.removeEventListener("paste", onPaste, options);
++    };
+   }
+ 
+   setPromptText(_text: string): boolean {
+-    return false; // not implemented yet
++    return false; // writePrompt: not in the read-only phase
+   }
+ 
+   onSubmitAttempt(_handler: SubmitHandler): Unsubscribe {
+-    return () => {}; // not implemented yet; registers nothing
++    return () => {}; // interceptSubmit: not in the read-only phase; registers nothing
+   }
+ }
+diff --git a/extension/src/popup/index.html b/extension/src/popup/index.html
+index 3fa768e..7e5828d 100644
+--- a/extension/src/popup/index.html
++++ b/extension/src/popup/index.html
+@@ -83,7 +83,7 @@
+       </div>
+     </dl>
+     <p class="note" id="build-note">
+-      Prompt checks on ChatGPT are not enabled in this build yet.
++      ChatGPT prompts are checked as you type (read-only). Sending is not blocked in this version.
+     </p>
+     <script src="popup.js"></script>
+   </body>
+diff --git a/extension/src/popup/popup.ts b/extension/src/popup/popup.ts
+index 5888f01..45b54b5 100644
+--- a/extension/src/popup/popup.ts
++++ b/extension/src/popup/popup.ts
+@@ -1,7 +1,7 @@
+ /**
+  * Popup script.
+  *
+- * Phase 3: static information only. The backend status is a placeholder
++ * Static information only. The backend status is a placeholder
+  * ("Not checked"); a real /health check is a later phase. Nothing here
+  * reports a backend state it has not actually observed.
+  */
+diff --git a/extension/src/shared/config.ts b/extension/src/shared/config.ts
+index 57c7383..8b1cfe2 100644
+--- a/extension/src/shared/config.ts
++++ b/extension/src/shared/config.ts
+@@ -30,6 +30,19 @@ export const API_PATHS = {
+ /** How long to wait for the backend before failing closed. */
+ export const REQUEST_TIMEOUT_MS = 10_000;
+ 
++/** Wait this long after the last keystroke before analyzing (content script). */
++export const TYPING_DEBOUNCE_MS = 600;
++
++/** Shorter wait after a paste, since the text arrives all at once. */
++export const PASTE_DEBOUNCE_MS = 150;
++
++/**
++ * How often the content script re-checks the editor. Catches changes that
++ * fire no input event (e.g. ChatGPT clearing the editor after Send, or a new
++ * chat replacing the editor) and keeps the indicator positioned.
++ */
++export const EDITOR_POLL_MS = 1_000;
++
+ /** Shown whenever no security decision could be made. Matches the backend. */
+ export const FAIL_CLOSED_MESSAGE = "PromptSecura could not complete the security analysis.";
+ 
+diff --git a/extension/test/adapter.test.ts b/extension/test/adapter.test.ts
+index ec0aae4..6e86662 100644
+--- a/extension/test/adapter.test.ts
++++ b/extension/test/adapter.test.ts
+@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
+ import { test } from "node:test";
+ 
+ import { findAdapter, hostnameMatches } from "../src/content/sites/adapter";
+-import { ChatGPTAdapter } from "../src/content/sites/chatgpt";
++import { ChatGPTAdapter, EDITOR_SELECTORS } from "../src/content/sites/chatgpt";
+ 
+ const adapter = new ChatGPTAdapter();
+ 
+@@ -17,15 +17,15 @@ test("ChatGPT adapter matches ChatGPT hosts over HTTPS only", () => {
+   assert.equal(adapter.matches(new URL("https://gemini.google.com/")), false);
+ });
+ 
+-test("ChatGPT placeholder adapter declares no capabilities and does nothing", () => {
++test("ChatGPT adapter is read-only: can read/observe, cannot write or intercept", () => {
+   assert.equal(adapter.id, "chatgpt");
+   assert.equal(adapter.displayName, "ChatGPT");
+   assert.deepEqual({ ...adapter.capabilities }, {
+-    readPrompt: false,
++    readPrompt: true,
++    observeInput: true,
+     writePrompt: false,
+     interceptSubmit: false,
+   });
+-  assert.equal(adapter.getPromptText(), null);
+   assert.equal(adapter.setPromptText("x"), false);
+   let called = false;
+   const unsubscribe = adapter.onSubmitAttempt(async () => {
+@@ -37,6 +37,20 @@ test("ChatGPT placeholder adapter declares no capabilities and does nothing", ()
+   assert.equal(called, false);
+ });
+ 
++test("ChatGPT adapter is inert without a DOM", () => {
++  assert.equal(adapter.findEditor(), null);
++  assert.equal(adapter.getPromptText(), null);
++  assert.equal(adapter.getIndicatorAnchor(), null);
++  const stop = adapter.observeInput(() => {});
++  assert.equal(typeof stop, "function");
++  stop();
++});
++
++test("editor selectors target the ChatGPT composer, most specific first", () => {
++  assert.equal(EDITOR_SELECTORS[0], '#prompt-textarea[contenteditable="true"]');
++  assert.ok(EDITOR_SELECTORS.every((s) => s.includes("prompt-textarea") || s.includes("ProseMirror")));
++});
++
+ test("findAdapter picks the matching adapter or null", () => {
+   assert.equal(findAdapter(new URL("https://chatgpt.com/"), [adapter]), adapter);
+   assert.equal(findAdapter(new URL("https://example.com/"), [adapter]), null);
+diff --git a/extension/test/analysis-controller.test.ts b/extension/test/analysis-controller.test.ts
+new file mode 100644
+index 0000000..d9b8884
+--- /dev/null
++++ b/extension/test/analysis-controller.test.ts
+@@ -0,0 +1,217 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import { AnalysisController, type Timers } from "../src/content/analysis-controller";
++import type { IndicatorState } from "../src/content/indicator-state";
++import type { AnalyzeOutcome, AnalyzeResponse, Decision } from "../src/shared/types";
++
++class FakeTimers implements Timers {
++  now = 0;
++  private nextId = 1;
++  private tasks = new Map<number, { at: number; fn: () => void }>();
++
++  setTimeout(fn: () => void, ms: number): unknown {
++    const id = this.nextId++;
++    this.tasks.set(id, { at: this.now + ms, fn });
++    return id;
++  }
++
++  clearTimeout(handle: unknown): void {
++    this.tasks.delete(handle as number);
++  }
++
++  advance(ms: number): void {
++    const target = this.now + ms;
++    for (;;) {
++      const due = [...this.tasks.entries()]
++        .filter(([, t]) => t.at <= target)
++        .sort((a, b) => a[1].at - b[1].at)[0];
++      if (!due) break;
++      this.tasks.delete(due[0]);
++      this.now = due[1].at;
++      due[1].fn();
++    }
++    this.now = target;
++  }
++}
++
++function response(decision: Decision, score: number): AnalyzeResponse {
++  return {
++    request_id: "r",
++    decision,
++    risk_level: score <= 30 ? "low" : score <= 60 ? "medium" : "high",
++    risk_score: score,
++    reasons: [`reason for ${decision}`],
++    pii_entities: [],
++    pii_summary: {},
++    injection_matches: [],
++    score_breakdown: { pii: 0, injection: score, obfuscation: 0, total: score },
++    sanitized_prompt: null,
++    latency_ms: 1,
++    detectors: {},
++  };
++}
++
++/** analyze() whose promises the test resolves explicitly. */
++function controllableAnalyze() {
++  const calls: { text: string; resolve: (o: AnalyzeOutcome) => void; reject: (e: unknown) => void }[] = [];
++  const analyze = (text: string) =>
++    new Promise<AnalyzeOutcome>((resolve, reject) => calls.push({ text, resolve, reject }));
++  return { analyze, calls };
++}
++
++const flush = () => new Promise((r) => setTimeout(r, 0));
++
++function setup() {
++  const timers = new FakeTimers();
++  const { analyze, calls } = controllableAnalyze();
++  const states: IndicatorState[] = [];
++  const controller = new AnalysisController({
++    analyze,
++    render: (s) => states.push(s),
++    typingDebounceMs: 600,
++    pasteDebounceMs: 150,
++    timers,
++  });
++  const kinds = () => states.map((s) => s.kind);
++  return { timers, calls, states, kinds, controller };
++}
++
++test("typing is debounced into a single request for the latest text", async () => {
++  const { timers, calls, controller, kinds } = setup();
++  controller.onTextChanged("h", "input");
++  timers.advance(200);
++  controller.onTextChanged("he", "input");
++  timers.advance(200);
++  controller.onTextChanged("hello", "input");
++  timers.advance(599);
++  assert.equal(calls.length, 0);
++  timers.advance(1);
++  assert.deepEqual(calls.map((c) => c.text), ["hello"]);
++  calls[0]!.resolve({ ok: true, response: response("ALLOW", 0) });
++  await flush();
++  assert.deepEqual(kinds(), ["analyzing", "safe"]);
++});
++
++test("paste uses the shorter debounce", () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("pasted text", "paste");
++  timers.advance(150);
++  assert.equal(calls.length, 1);
++});
++
++test("an input event followed by a paste read of the same text still uses the paste delay", () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("pasted text", "input");
++  controller.onTextChanged("pasted text", "paste");
++  timers.advance(150);
++  assert.equal(calls.length, 1);
++});
++
++test("decisions map to Safe / Medium Risk / High Risk", async () => {
++  for (const [decision, kind] of [["ALLOW", "safe"], ["SANITIZE", "medium"], ["BLOCK", "high"]] as const) {
++    const { timers, calls, controller } = setup();
++    controller.onTextChanged("text", "input");
++    timers.advance(600);
++    calls[0]!.resolve({ ok: true, response: response(decision, 42) });
++    await flush();
++    assert.equal(controller.state.kind, kind);
++  }
++});
++
++test("stale responses for text that has changed are discarded", async () => {
++  const { timers, calls, controller, kinds } = setup();
++  controller.onTextChanged("first", "input");
++  timers.advance(600);
++  controller.onTextChanged("first and more", "input");
++  timers.advance(600);
++  assert.equal(calls.length, 2);
++  calls[1]!.resolve({ ok: true, response: response("ALLOW", 0) });
++  await flush();
++  calls[0]!.resolve({ ok: true, response: response("BLOCK", 90) }); // late, stale
++  await flush();
++  assert.equal(controller.state.kind, "safe");
++  assert.ok(!kinds().includes("high"));
++});
++
++test("clearing the editor hides the indicator and drops in-flight results", async () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("secret", "input");
++  timers.advance(600);
++  controller.onTextChanged("", "poll");
++  assert.equal(controller.state.kind, "idle");
++  calls[0]!.resolve({ ok: true, response: response("BLOCK", 90) });
++  await flush();
++  assert.equal(controller.state.kind, "idle");
++});
++
++test("whitespace-only or missing editor text sends nothing", () => {
++  const { timers, calls, controller, states } = setup();
++  controller.onTextChanged("   \n ", "input");
++  controller.onTextChanged(null, "poll");
++  timers.advance(5000);
++  assert.equal(calls.length, 0);
++  assert.equal(states.length, 0); // stays idle, nothing rendered
++});
++
++test("unchanged text (poll) is not re-sent", async () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("same", "input");
++  timers.advance(600);
++  calls[0]!.resolve({ ok: true, response: response("ALLOW", 0) });
++  await flush();
++  controller.onTextChanged("same", "poll");
++  controller.onTextChanged("same", "poll");
++  timers.advance(5000);
++  assert.equal(calls.length, 1);
++});
++
++test("returning to the last analyzed text reuses its verdict without a request", async () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("abc", "input");
++  timers.advance(600);
++  calls[0]!.resolve({ ok: true, response: response("SANITIZE", 40) });
++  await flush();
++  controller.onTextChanged("abcd", "input");
++  assert.equal(controller.state.kind, "analyzing");
++  controller.onTextChanged("abc", "input");
++  assert.equal(controller.state.kind, "medium");
++  timers.advance(5000);
++  assert.equal(calls.length, 1);
++});
++
++test("backend failure shows Backend Unavailable, never Safe, and is not cached", async () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("x", "input");
++  timers.advance(600);
++  calls[0]!.resolve({
++    ok: false,
++    error: { kind: "network", message: "m", detail: "TypeError", status: null, retryable: true },
++  });
++  await flush();
++  assert.equal(controller.state.kind, "unavailable");
++  controller.onTextChanged("xy", "input");
++  controller.onTextChanged("x", "input"); // back to the failed text: must retry, not reuse
++  timers.advance(600);
++  assert.equal(calls.length, 2);
++});
++
++test("a thrown analyze() error also fails closed", async () => {
++  const { timers, calls, controller } = setup();
++  controller.onTextChanged("x", "input");
++  timers.advance(600);
++  calls[0]!.reject(new Error("boom"));
++  await flush();
++  assert.equal(controller.state.kind, "unavailable");
++});
++
++test("dispose stops further requests and renders", async () => {
++  const { timers, calls, controller, states } = setup();
++  controller.onTextChanged("x", "input");
++  const rendered = states.length;
++  controller.dispose();
++  timers.advance(600);
++  controller.onTextChanged("y", "input");
++  assert.equal(calls.length, 0);
++  assert.equal(states.length, rendered);
++});
+diff --git a/extension/test/indicator-and-messaging.test.ts b/extension/test/indicator-and-messaging.test.ts
+new file mode 100644
+index 0000000..493382c
+--- /dev/null
++++ b/extension/test/indicator-and-messaging.test.ts
+@@ -0,0 +1,93 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import { LABELS, labelFor, stateFromOutcome, tooltipFor } from "../src/content/indicator-state";
++import { createAnalyzer, isAnalyzeOutcome } from "../src/content/messaging";
++import { FAIL_CLOSED_MESSAGE } from "../src/shared/config";
++import type { AnalyzeOutcome, AnalyzeResponse } from "../src/shared/types";
++
++const RESPONSE: AnalyzeResponse = {
++  request_id: "r1",
++  decision: "BLOCK",
++  risk_level: "high",
++  risk_score: 70,
++  reasons: ["Attempts to make the model ignore or override its previous instructions (rule: instruction_override)"],
++  pii_entities: [],
++  pii_summary: {},
++  injection_matches: [],
++  score_breakdown: { pii: 0, injection: 70, obfuscation: 0, total: 70 },
++  sanitized_prompt: null,
++  latency_ms: 2,
++  detectors: { pii: "presidio(en_core_web_lg)", injection: "rules-v1" },
++};
++
++function fail(kind: "network" | "http", status: number | null): AnalyzeOutcome {
++  return { ok: false, error: { kind, message: FAIL_CLOSED_MESSAGE, detail: "d", status, retryable: true } };
++}
++
++// --- indicator-state ---------------------------------------------------------
++
++test("labels for each state", () => {
++  assert.equal(labelFor({ kind: "idle" }), "");
++  assert.equal(labelFor({ kind: "analyzing" }), "Analyzing…");
++  const high = stateFromOutcome({ ok: true, response: RESPONSE });
++  assert.equal(labelFor(high), "High Risk");
++  assert.equal(labelFor(stateFromOutcome({ ok: true, response: { ...RESPONSE, decision: "SANITIZE" } })), "Medium Risk");
++  assert.equal(labelFor(stateFromOutcome({ ok: true, response: { ...RESPONSE, decision: "ALLOW" } })), "Safe");
++  assert.equal(labelFor(stateFromOutcome(fail("network", null))), "Backend Unavailable");
++  assert.equal(labelFor(stateFromOutcome(fail("http", 503))), "Backend Unavailable");
++});
++
++test("413 is labelled accurately rather than as backend unavailable", () => {
++  assert.equal(labelFor(stateFromOutcome(fail("http", 413))), LABELS.tooLong);
++});
++
++test("state follows the decision, including medium scores escalated to BLOCK", () => {
++  const s = stateFromOutcome({ ok: true, response: { ...RESPONSE, risk_level: "medium", risk_score: 45 } });
++  assert.equal(s.kind, "high");
++});
++
++test("tooltip shows score and reasons, and says sending is not blocked", () => {
++  const tip = tooltipFor(stateFromOutcome({ ok: true, response: RESPONSE }));
++  assert.ok(tip.includes("risk 70/100"));
++  assert.ok(tip.includes("instruction_override"));
++  assert.ok(tip.includes("not blocked"));
++  assert.ok(tooltipFor(stateFromOutcome(fail("network", null))).includes("has not been checked"));
++});
++
++// --- messaging -----------------------------------------------------------------
++
++test("analyzer sends the analyze message for the site and returns a valid reply", async () => {
++  const sent: unknown[] = [];
++  const analyze = createAnalyzer("chatgpt", async (m) => {
++    sent.push(m);
++    return { ok: true, response: RESPONSE };
++  });
++  const outcome = await analyze("hello");
++  assert.deepEqual(sent, [{ type: "promptsecura/analyze", payload: { prompt: "hello", site: "chatgpt" } }]);
++  assert.equal(outcome.ok, true);
++});
++
++test("messaging errors (e.g. extension reloaded) fail closed", async () => {
++  const analyze = createAnalyzer("chatgpt", async () => {
++    throw new Error("Extension context invalidated.");
++  });
++  const outcome = await analyze("secret prompt");
++  assert.equal(outcome.ok, false);
++  if (!outcome.ok) {
++    assert.equal(outcome.error.message, FAIL_CLOSED_MESSAGE);
++    assert.ok(!outcome.error.detail.includes("secret"));
++  }
++});
++
++test("malformed or missing replies fail closed", async () => {
++  for (const reply of [undefined, null, {}, { ok: true }, { ok: true, response: { decision: "ALLOW" } }, { ok: false }]) {
++    const outcome = await createAnalyzer("chatgpt", async () => reply)("x");
++    assert.equal(outcome.ok, false, JSON.stringify(reply));
++  }
++});
++
++test("isAnalyzeOutcome accepts real failures from the service worker", () => {
++  assert.ok(isAnalyzeOutcome(fail("http", 503)));
++  assert.ok(isAnalyzeOutcome({ ok: true, response: RESPONSE }));
++});
+diff --git a/progress.md b/progress.md
+index 01490a3..493a3a8 100644
+--- a/progress.md
++++ b/progress.md
+@@ -7,7 +7,8 @@
+ | 1 | Repo scaffold + backend foundation | Code complete; **Codespaces verification pending** |
+ | 2 | PII detection and sanitization | Code complete; **Codespaces verification pending** |
+ | 3 | Chrome extension skeleton (MV3, TypeScript, esbuild) | Built and verified in sandbox Chromium; **`npm install` + typecheck with real `@types/chrome` pending** |
+-| 4 | To be defined (recommended below) | Not started |
++| 4 | ChatGPT read-only integration (editor reading, debounced analysis, risk indicator) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page**; **live chatgpt.com not tested** |
++| 5 | Enforcement (recommended below) | Not started |
+ 
+ Phase numbering follows the instructions given per phase.
+ 
+@@ -24,8 +25,12 @@ Phase numbering follows the instructions given per phase.
+ - **Phase 2: `IP_ADDRESS` weight raised from 30 to 35**, so an IP address alone is sanitized rather than allowed.
+ - **Phase 3: backend URL is build-time configuration** (`PROMPTSECURA_BACKEND_URL`). The build also adds that origin to `host_permissions`, so the service worker can call it without CORS. Changing it requires a rebuild.
+ - **Phase 3: all backend calls go through the service worker**, never the content script, which is subject to the page's CORS/CSP.
+-- **Phase 3: adapters declare capabilities.** The ChatGPT placeholder declares none, and the content script checks capabilities before doing anything.
+-- **Phase 3: the popup's "Protection status: Active"** is shown as requested, together with a line saying prompt checks on ChatGPT are not enabled in this build yet. The backend status shows "Not checked" rather than a state that was never observed.
++- **Phase 3: adapters declare capabilities**, and the content script checks them before relying on any feature.
++- **Phase 3: the popup's "Protection status: Active"** is shown as requested. A note underneath describes what the extension actually does; since Phase 4 it reads "ChatGPT prompts are checked as you type (read-only). Sending is not blocked in this version." The backend status shows "Not checked" rather than a state that was never observed.
++- **Phase 4: the indicator follows the backend decision**, not just the risk level: ALLOW → Safe, SANITIZE → Medium Risk, BLOCK → High Risk. A medium score escalated to BLOCK therefore shows as High Risk, which matches what enforcement will do.
++- **Phase 4: any failure shows "Backend Unavailable" and never "Safe".** One exception: an HTTP 413 shows "Too Long to Analyze", because the backend is up and it is not an outage.
++- **Phase 4: strictly read-only.** Only passive, capture-phase `input` and `paste` listeners are registered. There are no keydown, click or submit listeners, `preventDefault` is never called, and nothing is written into ChatGPT's DOM. The indicator is a Shadow-DOM host attached to `<html>`, outside ChatGPT's React tree, and positioned with fixed coordinates.
++- **Phase 4: debounce is 600 ms after typing and 150 ms after a paste**, with a 1 s editor poll. The poll catches changes without input events, such as ChatGPT clearing the editor after Send or a new chat replacing it. Stale responses are discarded with sequence numbers, and unchanged text is never re-sent.
+ 
+ ## Implemented
+ 
+@@ -70,6 +75,26 @@ Phase numbering follows the instructions given per phase.
+   - Unit tests
+ - **Backend:** unchanged. No compatibility change was needed; the existing CORS regex already allows `chrome-extension://` origins.
+ 
++### Phase 4
++
++All changes are in `extension/`; the backend is unchanged.
++
++- **`content/sites/chatgpt.ts`: the read-only ChatGPT adapter.**
++  - It declares the `readPrompt` and `observeInput` capabilities; `writePrompt` and `interceptSubmit` stay false.
++  - `EDITOR_SELECTORS` lists the editor selectors, tried in order, visible elements only: `#prompt-textarea[contenteditable="true"]`, `div.ProseMirror[contenteditable="true"]`, `textarea#prompt-textarea`.
++  - It reads text via `innerText` for contenteditable, or `value` for a textarea.
++  - It observes typing and paste with passive capture listeners on `document`.
++  - The indicator anchors to the editor's `<form>`.
++- **`content/sites/adapter.ts`:** the interface gains `observeInput` in the capabilities, plus `findEditor()`, `getIndicatorAnchor()` and `observeInput(listener)`.
++- **`content/analysis-controller.ts`:** debounce, the paste fast path, stale-response discarding, the unchanged-text skip, reuse of the last verdict, and failures that are never cached. It is DOM-free and uses injectable timers.
++- **`content/indicator-state.ts`:** the states (idle, Analyzing…, Safe, Medium Risk, High Risk, Backend Unavailable / Too Long to Analyze), plus the labels and tooltips.
++- **`content/indicator.ts`:** a Shadow-DOM pill with a coloured dot, label and score. The tooltip shows the backend reasons. It follows ChatGPT's light/dark theme and uses fixed positioning above the composer's top-right corner.
++- **`content/messaging.ts`:** the content script → service worker bridge. The reply is validated at runtime, and any messaging error (e.g. an extension reload) fails closed.
++- **`content/index.ts`:** wires everything together and logs `read-only analysis active`.
++- **`shared/config.ts`:** adds `TYPING_DEBOUNCE_MS`, `PASTE_DEBOUNCE_MS` and `EDITOR_POLL_MS`.
++- **Popup:** the note now describes read-only mode.
++- **Unchanged:** the service worker and API client needed no changes. The existing `promptsecura/analyze` route is now used by the content script.
++
+ ## Test status
+ 
+ **Total suite: 110 tests.**
+@@ -146,6 +171,47 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
+ 
+ **Still to run with real dependencies:** `cd extension && npm install && npm run check`. This is the first real dependency resolution and the first typecheck against the real `@types/chrome`. Commit the generated `package-lock.json` afterwards.
+ 
++### Phase 4 — extension
++
++As in Phase 3, there's no npm registry access. The checks used the local esbuild 0.27.7 and TypeScript 6.0.3.
++
++| Check | Result |
++|---|---|
++| `npm run build` / `npm run build:prod` | **Passed.** |
++| `npm run typecheck` as shipped | **Still fails in the sandbox**, only because `@types/chrome` is missing (`TS2688`). This is unchanged from Phase 3. |
++| `tsc` strict against the sandbox-only `chrome.runtime` stub | **Passed, 0 errors**, all src/test files checked. |
++| `npm test` | **42/42 passed.** That's 20 from Phase 3, with the adapter tests updated for the read-only contract, plus 22 new: 12 controller, 8 indicator-state/messaging, and 2 adapter. |
++| Mutation check on the new logic (each mutation in an isolated copy) | **6/6 caught:** stale responses kept, failures cached as verdicts, no debounce, reply not validated, BLOCK shown as medium, adapter claiming `interceptSubmit`. |
++| Real Chromium 141, Phase 4 harness | **23/23 passed.** See below. |
++| Real Chromium 141, Phase 3 harness (regression) | **21/21 passed.** Its content-script check was updated to the new read-only log message. |
++| Backend | **0 files changed**; 83/83 offline backend tests pass. |
++
++The Phase 4 harness is a sandbox-only script. It serves a **fixture page at `https://chatgpt.com/`** that imitates ChatGPT's composer:
++
++- A ProseMirror-style `#prompt-textarea` contenteditable inside a `<form>`, plus a hidden fallback textarea.
++- Page-owned Enter and Send handlers that clear the editor programmatically, as ChatGPT does.
++
++A **fixture API server** returns canned ALLOW / SANITIZE / BLOCK / 503 responses. The harness verified:
++
++- **Startup:** the read-only log line appears, and with an empty editor there is no indicator and no request.
++- **Typing:** "Analyzing…" shows, then "Safe". Typing 11 characters sends **one** request containing the full text, and the score is shown.
++- **Position:** the indicator sits 6 px above the composer, right-aligned.
++- **States:**
++  - Clearing the editor hides the indicator.
++  - An email address shows "Medium Risk" with score 35/100.
++  - A paste leads to "High Risk", and the request went out after **161 ms**, under the typing debounce.
++- **Send is unchanged:**
++  - **Enter still sends a High Risk prompt**, and the Enter keydown was not `defaultPrevented` by the extension.
++  - The indicator hides after the page clears the editor without an input event (via the poll).
++  - The Send button still sends.
++- **Failures:** a 503 shows "Backend Unavailable", with a tooltip saying the prompt has not been checked. A stopped server also shows "Backend Unavailable".
++- **Isolation and privacy:**
++  - The indicator host is attached to `<html>`, and neither `<body>` nor the form contains any PromptSecura element.
++  - Neither the page console nor the indicator ever contains prompt text.
++- **Popup:** the note describes read-only mode.
++
++**Not tested:** the live chatgpt.com, desktop Google Chrome, and the real backend over HTTP (FastAPI can't be installed here).
++
+ ## Limitations
+ 
+ - **Presidio has not been run.** Detection quality, recognizer names, and the specific test inputs (e.g. the credit-card format with spaces) are unconfirmed until the Codespace run.
+@@ -156,10 +222,13 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
+ - **Placeholders are generic.** Two different emails both become `[EMAIL]`, and the original values cannot be restored.
+ - **Dependency ranges are not pinned** to verified versions yet. Run `pip freeze` after a green Codespace run.
+ - **Rule-based injection detection** limitations are unchanged from Phase 1.
+-- **The extension does not protect anything yet.** The ChatGPT adapter is a placeholder; no prompts are read, analyzed or blocked.
++- **The extension warns but does not protect yet.** It is read-only: High Risk prompts can still be sent. Enforcement is the next phase.
++- **The ChatGPT selectors have not been tested on the live chatgpt.com**, which is unreachable from the sandbox. They match ChatGPT's known composer markup, and were verified only against a fixture page that imitates it. This is the most likely point of failure. If the indicator never appears, check `EDITOR_SELECTORS` (see README → troubleshooting).
++- **After "Backend Unavailable", there is no automatic retry** while the text is unchanged. The next edit triggers a new check.
++- **The indicator position is heuristic.** It is placed above the right edge of the composer's `<form>`, and may need adjusting against the real layout.
+ - **No `package-lock.json`** could be generated without registry access. The `@types/chrome` range (`>=0.0.268 <1`) has not been resolved against npm yet.
+ - **Backend URL changes need a rebuild.** A runtime setting (popup/options) would require `optional_host_permissions`, which is planned for later.
+-- **Codespaces port visibility.** For the extension to reach a Codespaces backend, port 8000 must be **public**, because private ports require a GitHub login. The API has no authentication yet, so keep it private until an auth phase. This does not matter in Phase 3, since nothing calls the backend yet.
++- **Codespaces port visibility now matters.** The extension calls the backend, and a private Codespaces port requires a GitHub login, which the extension can't provide. The indicator then shows "Backend Unavailable". Run the backend locally, or make the port public temporarily with test prompts only; the API has no authentication. See README → *Port visibility and the extension*.
+ - **No extension icons.** Chrome shows a default icon.
+ 
+ ## Next phase
+@@ -167,21 +236,17 @@ Not covered: the real ChatGPT site (no network), and loading the extension in de
+ 1. **Verify everything with real dependencies first:**
+    - `cd backend && python -m pytest` should give 110 passed, 0 skipped.
+    - `cd extension && npm install && npm run check`.
+-2. **Recommended Phase 4: ChatGPT adapter plus read-only analysis and indicator.**
+-   - Implement the ChatGPT adapter's `readPrompt` capability: locate the prompt editor and read its text.
+-   - On typing (debounced) and on send, send the text to the service worker's `promptsecura/analyze` route.
+-   - Show the on-page indicator (analyzing / safe / sanitize / block / "could not complete").
+-   - **Do not block sending yet.** This validates the DOM integration and the real network path with low risk.
+-3. **Then enforcement:**
+-   - Intercept Enter and the send button (`interceptSubmit`) and apply ALLOW/SANITIZE/BLOCK, with fail-closed behaviour on Send.
+-   - Write the sanitized prompt back into the editor (`writePrompt`).
++   - **New in Phase 4:** load `extension/dist` in desktop Chrome, run the backend, and type on the real chatgpt.com. Confirm that the indicator appears and changes state. If it doesn't, fix `EDITOR_SELECTORS` first; everything later depends on it.
++2. **Recommended Phase 5: enforcement on ChatGPT.**
++   - Implement `interceptSubmit`: capture Enter and the send button, re-analyze the final text on Send, and apply ALLOW / SANITIZE / BLOCK.
++   - Implement `writePrompt` for "Use Sanitized Prompt", plus "Edit" on BLOCK.
++   - Apply the agreed **fail-closed** Send policy: "PromptSecura could not complete the security analysis." with edit/retry.
+ 
+ ## Deliberately deferred
+ 
+ The following are out of scope so far:
+ 
+-- ChatGPT DOM integration and prompt interception
+-- Enforcement UI and fail-closed Send handling (backend and API client already support it)
++- Send interception and enforcement (BLOCK/SANITIZE on Send), writing the sanitized prompt, and fail-closed Send handling (backend and API client already support it)
+ - Live backend health check in the popup, and extension↔backend authentication
+ - Dashboard and database
+ - Gemini and Claude support
+-- 
+2.43.0
+
