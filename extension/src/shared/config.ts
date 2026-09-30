@@ -37,11 +37,14 @@ export const TYPING_DEBOUNCE_MS = 600;
 export const PASTE_DEBOUNCE_MS = 150;
 
 /**
- * How often the content script re-checks the editor. Catches changes that
- * fire no input event (e.g. ChatGPT clearing the editor after Send, or a new
- * chat replacing the editor) and keeps the indicator positioned.
+ * Composer observation (Phase 6). A MutationObserver on <body> schedules a
+ * check at most once per COMPOSER_CHECK_MS; it catches changes that fire no
+ * input event (ChatGPT clearing the editor after Send, a new chat replacing
+ * the editor, SPA navigation). A slow fallback timer covers anything the
+ * observer might miss.
  */
-export const EDITOR_POLL_MS = 1_000;
+export const COMPOSER_CHECK_MS = 150;
+export const COMPOSER_FALLBACK_CHECK_MS = 2_000;
 
 /** Shown whenever no security decision could be made. Matches the backend. */
 export const FAIL_CLOSED_MESSAGE = "PromptSecura could not complete the security analysis.";

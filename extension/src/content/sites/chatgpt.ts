@@ -19,17 +19,40 @@
  *
  * Typing/paste observation remains passive (Phase 4).
  *
+ * Real-site handling (Phase 6):
+ *   - Composer detection: the known editor selectors first; if none match,
+ *     any visible editable element inside a known composer <form>. Submit
+ *     interception uses the same fallback, so a renamed editor id does not
+ *     silently disable enforcement.
+ *   - ChatGPT only shows the send button when the box has text (a voice
+ *     button otherwise) and shows a stop button while a reply streams.
+ *     isSiteBusy() reports the streaming state so attempts are ignored, as
+ *     ChatGPT itself ignores them.
+ *   - SPA: observeComposer() uses one MutationObserver on <body> (coalesced
+ *     to one check per COMPOSER_CHECK_MS, plus a slow fallback timer and
+ *     popstate) to report navigation and composer replacement. PromptSecura's
+ *     own UI lives on <html>, outside <body>, so it can't trigger the observer.
+ *   - Text extraction strips ProseMirror's trailing-break artifacts.
+ *
  * DOM assumptions: ChatGPT's composer is a ProseMirror contenteditable with
  * id="prompt-textarea" (older builds used a <textarea> with that id) inside a
- * <form>, with a send button marked data-testid="send-button". These
- * selectors were NOT verified against the live site from the development
- * environment; if ChatGPT changes its markup, update EDITOR_SELECTORS and
- * SEND_BUTTON_SELECTORS below. All ChatGPT-specific selectors live here.
+ * <form data-type="unified-composer">, with a send button marked
+ * data-testid="send-button" and a stop button data-testid="stop-button".
+ * These selectors were NOT verified against the live site from the
+ * development environment (it was unreachable); if ChatGPT changes its
+ * markup, update the *_SELECTORS constants below. All ChatGPT-specific
+ * selectors live in this file.
  */
 
-import { SUPPORTED_SITES, type SupportedSite } from "../../shared/config";
+import {
+  COMPOSER_CHECK_MS,
+  COMPOSER_FALLBACK_CHECK_MS,
+  SUPPORTED_SITES,
+  type SupportedSite,
+} from "../../shared/config";
 import type {
   AdapterCapabilities,
+  ComposerChange,
   InputReason,
   SiteAdapter,
   SubmitHandler,
@@ -61,6 +84,21 @@ export const SEND_BUTTON_SELECTORS: readonly string[] = [
   'button[aria-label="Send message"]',
 ];
 
+/** The composer form. Used to scope lookups and as the detection fallback. */
+export const COMPOSER_FORM_SELECTORS: readonly string[] = [
+  'form[data-type="unified-composer"]',
+  "form:has(#prompt-textarea)",
+];
+
+/** Shown by ChatGPT instead of the send button while a reply is streaming. */
+export const STOP_BUTTON_SELECTORS: readonly string[] = [
+  'button[data-testid="stop-button"]',
+  'button[aria-label="Stop streaming"]',
+];
+
+/** Editable elements accepted by the composer-form fallback. */
+const EDITABLE_FALLBACK_SELECTOR = '[contenteditable="true"], textarea';
+
 const CAPABILITIES: Readonly<AdapterCapabilities> = Object.freeze({
   readPrompt: true,
   observeInput: true,
@@ -83,12 +121,31 @@ function isVisible(el: HTMLElement): boolean {
   return el.isConnected && el.getClientRects().length > 0;
 }
 
-/** Text of a textarea/input, or the rendered text of a contenteditable. */
+/**
+ * Text of a textarea/input, or the rendered text of a contenteditable.
+ * Trailing newlines are removed: an empty ProseMirror paragraph renders as
+ * <p><br class="ProseMirror-trailingBreak"></p>, whose innerText is "\n".
+ */
 export function readEditorText(el: HTMLElement): string {
   if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
     return el.value;
   }
-  return el.innerText ?? el.textContent ?? "";
+  return (el.innerText ?? el.textContent ?? "").replace(/\n+$/, "");
+}
+
+function firstVisible<T extends HTMLElement>(scope: ParentNode, selectors: readonly string[]): T | null {
+  for (const selector of selectors) {
+    for (const el of scope.querySelectorAll<T>(selector)) {
+      if (isVisible(el)) return el;
+    }
+  }
+  return null;
+}
+
+function isEditable(target: EventTarget | null): target is HTMLElement {
+  return (
+    target instanceof HTMLElement && (target.isContentEditable || target instanceof HTMLTextAreaElement)
+  );
 }
 
 export class ChatGPTAdapter implements SiteAdapter {
@@ -103,12 +160,30 @@ export class ChatGPTAdapter implements SiteAdapter {
     return hostnameMatches(url, CHATGPT.hostnames);
   }
 
+  /** Visible composer forms on the page. */
+  private composerForms(): HTMLFormElement[] {
+    if (typeof document === "undefined") return [];
+    const forms: HTMLFormElement[] = [];
+    for (const selector of COMPOSER_FORM_SELECTORS) {
+      for (const form of document.querySelectorAll<HTMLFormElement>(selector)) {
+        if (isVisible(form) && !forms.includes(form)) forms.push(form);
+      }
+    }
+    return forms;
+  }
+
+  private isComposerForm(form: HTMLFormElement): boolean {
+    return COMPOSER_FORM_SELECTORS.some((selector) => form.matches(selector));
+  }
+
   findEditor(): HTMLElement | null {
     if (typeof document === "undefined") return null;
-    for (const selector of EDITOR_SELECTORS) {
-      for (const el of document.querySelectorAll<HTMLElement>(selector)) {
-        if (isVisible(el)) return el;
-      }
+    const known = firstVisible<HTMLElement>(document, EDITOR_SELECTORS);
+    if (known) return known;
+    // Fallback: any visible editable element inside a known composer form.
+    for (const form of this.composerForms()) {
+      const editable = firstVisible<HTMLElement>(form, [EDITABLE_FALLBACK_SELECTOR]);
+      if (editable) return editable;
     }
     return null;
   }
@@ -156,12 +231,53 @@ export class ChatGPTAdapter implements SiteAdapter {
   findSendButton(): HTMLButtonElement | null {
     if (typeof document === "undefined") return null;
     const scope: ParentNode = this.findEditor()?.closest("form") ?? document;
-    for (const selector of SEND_BUTTON_SELECTORS) {
-      for (const el of scope.querySelectorAll<HTMLButtonElement>(selector)) {
-        if (isVisible(el)) return el;
-      }
-    }
-    return null;
+    return firstVisible<HTMLButtonElement>(scope, SEND_BUTTON_SELECTORS);
+  }
+
+  isSiteBusy(): boolean {
+    if (typeof document === "undefined") return false;
+    const scope: ParentNode = this.findEditor()?.closest("form") ?? document;
+    return firstVisible<HTMLButtonElement>(scope, STOP_BUTTON_SELECTORS) !== null;
+  }
+
+  observeComposer(listener: (change: ComposerChange) => void): Unsubscribe {
+    if (typeof document === "undefined" || typeof MutationObserver === "undefined") return () => {};
+
+    let lastUrl = location.href;
+    let lastEditor = this.findEditor();
+    let scheduled: ReturnType<typeof setTimeout> | null = null;
+
+    const check = (): void => {
+      scheduled = null;
+      const url = location.href;
+      const editor = this.findEditor();
+      const change: ComposerChange = {
+        navigated: url !== lastUrl,
+        editorChanged: editor !== lastEditor,
+        hasEditor: editor !== null,
+      };
+      lastUrl = url;
+      lastEditor = editor;
+      listener(change);
+    };
+    // Coalesce bursts of mutations (typing, streaming replies) into one check.
+    const schedule = (): void => {
+      if (scheduled === null) scheduled = setTimeout(check, COMPOSER_CHECK_MS);
+    };
+
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    const fallback = setInterval(schedule, COMPOSER_FALLBACK_CHECK_MS);
+    window.addEventListener("popstate", schedule);
+    window.addEventListener("hashchange", schedule);
+
+    return () => {
+      observer.disconnect();
+      clearInterval(fallback);
+      if (scheduled !== null) clearTimeout(scheduled);
+      window.removeEventListener("popstate", schedule);
+      window.removeEventListener("hashchange", schedule);
+    };
   }
 
   private sendButtonFromTarget(target: EventTarget | null): HTMLButtonElement | null {
@@ -223,7 +339,12 @@ export class ChatGPTAdapter implements SiteAdapter {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (this.bypassing) return;
       if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
-      if (!this.isInEditor(event.target)) return;
+      const inComposer =
+        this.isInEditor(event.target) ||
+        // Fallback: an editable element inside the composer form, in case the
+        // editor selectors stop matching.
+        (isEditable(event.target) && this.composerForms().some((f) => f.contains(event.target as Node)));
+      if (!inComposer) return;
       intercept(event, "enter");
     };
     const onClick = (event: MouseEvent): void => {
@@ -234,8 +355,9 @@ export class ChatGPTAdapter implements SiteAdapter {
     const onSubmit = (event: Event): void => {
       if (this.bypassing) return;
       const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
       const editor = this.findEditor();
-      if (!(form instanceof HTMLFormElement) || !editor || !form.contains(editor)) return;
+      if (!(editor && form.contains(editor)) && !this.isComposerForm(form)) return;
       intercept(event, "form");
     };
 

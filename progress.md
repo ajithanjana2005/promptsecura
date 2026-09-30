@@ -9,6 +9,7 @@
 | 3 | Chrome extension skeleton (MV3, TypeScript, esbuild) | Built and verified in sandbox Chromium; **`npm install` + typecheck with real `@types/chrome` pending** |
 | 4 | ChatGPT read-only integration (editor reading, debounced analysis, risk indicator) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page**; **live chatgpt.com not tested** |
 | 5 | Enforcement on ChatGPT (ALLOW / SANITIZE / BLOCK / fail-closed on Send) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page** (chatgpt.com and chat.openai.com); **live ChatGPT not tested** |
+| 6 | Real-site ChatGPT integration (composer fallback, streaming/busy state, SPA navigation, MutationObserver) + committed browser test suite | Built; **75/75 unit + 21/21 e2e tests pass** in the sandbox, against a ChatGPT-like fixture page. **The live chatgpt.com was unreachable (HTTP 403) and has NOT been tested** |
 
 Phase numbering follows the instructions given per phase.
 
@@ -38,6 +39,14 @@ Phase numbering follows the instructions given per phase.
 - **Phase 5: duplicate protection.** An in-flight lock ignores repeat attempts while a check or panel is open. After a send, identical text within 1.5 s is ignored, because ChatGPT clears its editor asynchronously.
 - **Phase 5: writing the sanitized prompt.** For contenteditable (ProseMirror), the editor contents are selected with a Range and replaced with `document.execCommand("insertText")`, so the editor's own state updates. For a textarea, the native value setter is used and an `input` event dispatched. The write is verified by reading back.
 - **Phase 5: enforcement panel.** Same Shadow-DOM approach and colours as the indicator. The badges are **SANITIZE** (amber), **BLOCKED** (red), **ERROR** (grey) and **SANITIZED** (green confirmation); SAFE sends with no panel. Findings are shown by entity type and threat category, never by value.
+- **Phase 6: no new UI system and no second interception path.** Phase 6 extends the existing `ChatGPTAdapter`, `SubmitGuard` and content-script wiring. All new ChatGPT selectors are in `sites/chatgpt.ts`.
+- **Phase 6: composer detection has a fallback.** It tries `EDITOR_SELECTORS` first. If none match, it uses any visible editable element inside a `COMPOSER_FORM_SELECTORS` form (`form[data-type="unified-composer"]`, `form:has(#prompt-textarea)`). Enter and form-submit interception use the same fallback, so renaming the editor's id no longer disables enforcement.
+- **Phase 6: "site busy" = ChatGPT's stop button is visible** (`STOP_BUTTON_SELECTORS`, i.e. a reply is streaming). Submit attempts are then ignored without analysis, matching ChatGPT's own behaviour. Previously they ran a check and ended in a "not ready" error.
+- **Phase 6: one throttled `MutationObserver` replaces the 1 s poll.** It observes `<body>` (childList, subtree, characterData), coalesced to one check per 150 ms, with a 2 s fallback timer and `popstate` / `hashchange`. PromptSecura's UI hosts are attached to `<html>`, outside `<body>`, so the extension can't trigger its own observer, which rules out a loop.
+- **Phase 6: SPA navigation invalidates the guard.** The guard has an epoch counter. `invalidate()` closes any open dialog (new `EnforcementUI.dismiss()`), makes the in-flight attempt stale, and releases the lock immediately. A stale attempt never sends, never opens a dialog, and never releases a newer attempt's lock.
+- **Phase 6: listeners are registered once per page** (content-script `INSTANCE_FLAG`) and delegated on `window`/`document`, so composer remounts need no re-registration and can't create duplicate listeners.
+- **Phase 6: text extraction strips trailing newlines** left by ProseMirror's empty-paragraph `<br class="ProseMirror-trailingBreak">`.
+- **Phase 6: committed browser tests** (`npm run test:e2e`, Playwright). The earlier real-browser checks were sandbox-only scripts; this suite is in the repo and can be re-run by anyone.
 - **Phase 4: debounce is 600 ms after typing and 150 ms after a paste**, with a 1 s editor poll. The poll catches changes without input events, such as ChatGPT clearing the editor after Send or a new chat replacing it. Stale responses are discarded with sequence numbers, and unchanged text is never re-sent.
 
 ## Implemented
@@ -124,6 +133,33 @@ All changes are in `extension/`; the backend is unchanged.
 - **`content/analysis-controller.ts`:** new `analyzeNow(text)`, an immediate check that returns the outcome and updates the indicator. `run()` now returns its outcome.
 - **`content/index.ts`:** wires `adapter.onSubmitAttempt` → `SubmitGuard` → `controller.analyzeNow` and the `EnforcementPanel`. It logs `protection active`.
 - **Popup:** the note now describes enforcement.
+
+### Phase 6
+
+The backend is unchanged.
+
+- **`content/sites/chatgpt.ts`:**
+  - New `COMPOSER_FORM_SELECTORS` and `STOP_BUTTON_SELECTORS`.
+  - Composer-form fallback in `findEditor()`, Enter interception and form-submit interception.
+  - New `isSiteBusy()` and `observeComposer()` (MutationObserver + fallback timer + popstate/hashchange).
+  - A shared `firstVisible()` helper.
+  - `readEditorText()` strips trailing newlines.
+- **`content/sites/adapter.ts`:** new `ComposerChange` type, plus `isSiteBusy()` and `observeComposer()` on `SiteAdapter`.
+- **`content/submit-guard.ts`:**
+  - `invalidate()` with an epoch counter; stale checks after every await.
+  - The `site-busy` and `navigated` results.
+  - `EnforcementUI.dismiss()` and the optional `EditorOps.isSiteBusy()`.
+- **`content/index.ts`:** the 1 s `setInterval` poll is replaced with `adapter.observeComposer()`; navigation calls `guard.invalidate()`. It logs debug-only metadata (`composer check`, `navigation`).
+- **`shared/config.ts`:** `EDITOR_POLL_MS` is replaced by `COMPOSER_CHECK_MS` (150) and `COMPOSER_FALLBACK_CHECK_MS` (2000).
+- **`build.mjs`:** new `--outdir=DIR` option, so e2e builds don't overwrite `dist/`.
+- **`package.json`:** new `test:e2e` script; `playwright` devDependency (`^1.56.0`).
+- **New `e2e/` directory:**
+  - `chatgpt.e2e.test.mjs`: 21 tests.
+  - `harness.mjs`: build, launch, routing and page helpers.
+  - `fixtures/chatgpt.html`: a ChatGPT-like page with the send / voice / stop button states, async clearing, streaming, `pushState`/`popstate` navigation with composer remounts, and click-only and renamed-markup variants.
+  - `fixtures/analyze-server.mjs`: the stand-in backend.
+- **Unit tests:** 7 new (5 SubmitGuard, 2 adapter), and the navigation-dialog test was hardened.
+- **`.gitignore`:** adds `.e2e-dist/`.
 
 ## Test status
 
@@ -283,6 +319,51 @@ The Phase 5 harness is a sandbox-only script. It serves a **ChatGPT-like fixture
 
 **Not tested:** the live chatgpt.com / chat.openai.com (unreachable from the sandbox), ChatGPT's real ProseMirror editor and React send handler, desktop Google Chrome, the real FastAPI backend over HTTP, and IME composition.
 
+### Phase 6 — extension
+
+The live chatgpt.com / chat.openai.com were **unreachable (HTTP 403) from the sandbox**. Nothing below was run against the real site. There's still no npm registry access; the checks used the local esbuild 0.27.7, TypeScript 6.0.3 and Playwright 1.56.0 with Chromium 141.
+
+| Check | Result |
+|---|---|
+| `npm test` (unit) | **75/75 passed, 0 cancelled.** That's 68 from Phase 5 plus 7 new. |
+| `npm run test:e2e` (committed browser suite) | **21/21 passed**, and **21/21 on each of 3 further runs** (about 33 s per run). |
+| e2e mutation check (isolated copies) | **5/5 caught**, each by its targeted test: composer fallback removed; site-busy check removed; no invalidation on navigation; observer disabled; SANITIZE sends the original. |
+| e2e global leak assertion | Verified to fail the run (exit 1) when a raw email is planted in what the page received. |
+| Unit mutation check (isolated copies) | **5/5 caught cleanly.** Two needed test fixes first; see below. |
+| `tsc` strict against the sandbox `chrome.runtime` stub | **Passed, 0 errors.** It also caught the missing `dismiss()` on the test's `FakeUI` during development. |
+| `npm run typecheck` as shipped | **Still fails in the sandbox**, only because `@types/chrome` is missing (`TS2688`). |
+| `npm run build` / `build:prod` | **Passed.** |
+| Regression: sandbox Phase 5 harness / Phase 3 harness | **36/36 / 21/21 passed.** |
+| Backend | **0 files changed**; 83/83 offline tests pass. |
+
+Two weaknesses in the tests were found and fixed:
+
+- **"Stale verdict used after navigation" survived** at first, because `submit()`'s own stale check also covered it (defence in depth). A test now checks the earlier layer directly: after navigation, a stale SANITIZE or BLOCK verdict must not open a dialog on the new page.
+- **"Dialog kept open on navigation" was first caught only by a hang**, which cancelled other tests. The test now races the attempt against a 200 ms timeout, so it fails cleanly.
+
+The e2e tests cover:
+
+- **Composer detection:** the standard markup, and the renamed-editor fallback, where Enter is still intercepted.
+- **Text extraction:** multi-line text via Shift+Enter; the empty placeholder is never analyzed.
+- **Paste:** analyzed in under 500 ms.
+- **SAFE:** via Enter, one submit-time analysis and one send; via the Send button, in both the form-submit and click-handler variants, each sent exactly once.
+- **SANITIZE:** "Use Sanitized Prompt" sends only `Email [EMAIL] the notes`; Edit Prompt and Cancel send nothing.
+- **BLOCK:** Enter, the button, and repeats never submit.
+- **Backend failure:** a 503, then Retry, sends once; with the server down, a PII prompt is never sent.
+- **Empty prompt:** no analysis, no send, no dialog.
+- **Duplicates:** Enter, Enter, click, Enter during a slow check → one send.
+- **Prompt edited during a check:** nothing is sent; the next Enter sends the new text once.
+- **Streaming:** Enter while the stop button shows is ignored, with no error dialog; sending works afterwards.
+- **Navigation:**
+  - After 3 new chats (4 composer mounts), one Enter gives one analysis and one send, so there are no duplicate listeners.
+  - Navigating while the SANITIZE dialog is open closes it and sends nothing.
+  - Navigating to a page without a composer hides the indicator; going Back re-finds the composer, and enforcement works.
+- **No observer loop:** an idle page makes no analysis requests and at most 3 checks in 2.5 s.
+- **chat.openai.com:** SAFE and BLOCK both behave correctly.
+- **Global, after every test:** no raw email and no injection text ever reached the page's send handler, and the console never contained prompt text.
+
+**Not tested:** the live ChatGPT; ChatGPT's real ProseMirror editor (including programmatic insertion of the sanitized text); ChatGPT's real React send handling; desktop Google Chrome; the real FastAPI backend over HTTP; IME composition; the e2e suite in Codespaces.
+
 ## Limitations
 
 - **Presidio has not been run.** Detection quality, recognizer names, and the specific test inputs (e.g. the credit-card format with spaces) are unconfirmed until the Codespace run.
@@ -293,11 +374,14 @@ The Phase 5 harness is a sandbox-only script. It serves a **ChatGPT-like fixture
 - **Placeholders are generic.** Two different emails both become `[EMAIL]`, and the original values cannot be restored.
 - **Dependency ranges are not pinned** to verified versions yet. Run `pip freeze` after a green Codespace run.
 - **Rule-based injection detection** limitations are unchanged from Phase 1.
-- **Enforcement depends on the ChatGPT selectors, and fails OPEN if they break.** If ChatGPT changes its markup so that `EDITOR_SELECTORS` no longer match, Enter isn't recognized as a submit from the editor. If `SEND_BUTTON_SELECTORS` don't match either, the send button isn't intercepted, and prompts go to ChatGPT **unchecked**. This is inherent to DOM-based interception; the extension cannot enforce what it cannot see. The indicator not appearing while typing is the visible warning sign (see README → troubleshooting). A future hardening step could detect a missing composer and warn the user.
+- **None of the ChatGPT integration has been verified on the live site.** chatgpt.com returned HTTP 403 from the development sandbox. Every browser test ran against `e2e/fixtures/chatgpt.html`, which models ChatGPT's composer from its publicly known markup and behaviour. If the real site differs (element ids, how Send is triggered, how the editor reacts to programmatic text insertion), the tests won't show it. The live checklist below is the real acceptance test.
+- **Enforcement still fails OPEN if ChatGPT's markup changes enough.** Phase 6 narrowed this: renaming the editor's id is now covered by the composer-form fallback. But if **both** `EDITOR_SELECTORS` and `COMPOSER_FORM_SELECTORS` stop matching, Enter isn't intercepted. If `SEND_BUTTON_SELECTORS` also miss, prompts go to ChatGPT **unchecked**. DOM-based interception can't enforce what it can't see. The visible warning sign is the indicator not appearing while typing.
+- **If ChatGPT triggers Send from an event other than** Enter keydown, click, or form submit (e.g. `pointerdown`), that path isn't intercepted.
 - **Other ways of sending are not intercepted:** editing and resending an earlier message (ChatGPT's inline edit box), voice input, and file/image attachments. Only the main composer's Enter, send button and form submit are covered.
 - **Writing the sanitized prompt uses `document.execCommand("insertText")`.** It is deprecated but still supported by Chrome. It worked on the fixture's plain contenteditable, but has **not been tested against ChatGPT's real ProseMirror editor**. If the write doesn't take, nothing is sent and the user is told to edit manually.
 - **What was typed stays in ChatGPT's message box** after a BLOCK or SANITIZE, so the user can edit it. The extension prevents it from being *submitted*, but has no control over anything ChatGPT's page itself does with draft text before submission.
-- **Sending when ChatGPT isn't ready** (e.g. while a reply is still streaming and the send button is replaced): the check still runs, but the approved prompt can't be sent, and an error says to try again.
+- **"Site busy" is detected only by ChatGPT's stop button.** If ChatGPT is busy in a way that shows no stop button, the check runs; if the send button is then missing or disabled, the prompt isn't sent and a "not ready" error appears.
+- **The `e2e` suite needs Playwright's Chromium**, via `npx playwright install --with-deps chromium`. It has been run only in the sandbox, not yet in Codespaces.
 - **IME composition (e.g. Japanese input):** Enter during composition is left alone. This path was not tested.
 - **The ChatGPT selectors have not been tested on the live chatgpt.com**, which is unreachable from the sandbox. They match ChatGPT's known composer markup, and were verified only against a fixture page that imitates it. This is the most likely point of failure. If the indicator never appears, check `EDITOR_SELECTORS` (see README → troubleshooting).
 - **The live indicator doesn't auto-retry after "Backend Unavailable"** while the text is unchanged. The next edit, or pressing Send, triggers a new check.
@@ -318,8 +402,10 @@ The Phase 5 harness is a sandbox-only script. It serves a **ChatGPT-like fixture
      - an email address triggers SANITIZE, and "Use Sanitized Prompt" sends `[EMAIL]` text;
      - "ignore all previous instructions" is BLOCKED;
      - with the backend stopped, Send shows ERROR and nothing is sent.
-     If any of these fail, fix `EDITOR_SELECTORS` / `SEND_BUTTON_SELECTORS` / the sanitized write first.
-2. **The next phase is to be defined by you.** Natural candidates are hardening after live testing: warning when the composer can't be found (instead of failing open), a live backend health check in the popup, and extension↔backend authentication before any shared deployment.
+     - after **New chat**, all of the above still work, and pressing Enter while a reply is streaming does nothing.
+     If any of these fail, fix the `*_SELECTORS` in `sites/chatgpt.ts` or the sanitized write first.
+   - `cd extension && npx playwright install --with-deps chromium && npm run test:e2e` should give 21/21.
+2. **The next phase is to be defined by you.** The most important next step is running the live checklist on the real chatgpt.com, and fixing selectors or send triggering if anything differs. Candidates after that: warning when the composer can't be found (instead of failing open), a live backend health check in the popup, and extension↔backend authentication before any shared deployment.
 
 ## Deliberately deferred
 

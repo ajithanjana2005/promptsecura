@@ -20,6 +20,14 @@
  * site clears its editor asynchronously and a quick second Enter would
  * otherwise resend the same prompt.
  *
+ * SPA navigation (Phase 6): invalidate() closes any open dialog and makes an
+ * in-flight attempt stale; a stale attempt never sends and releases the lock
+ * immediately, so the new page is not blocked by an old check.
+ *
+ * Site busy (Phase 6): while the site itself would not accept a prompt (a
+ * reply is streaming), attempts are ignored without analysis, as the site
+ * itself ignores them. Nothing is sent.
+ *
  * DOM-free: the editor and UI are injected, so every path is unit-tested.
  */
 
@@ -44,6 +52,8 @@ export interface EnforcementUI {
   showError(error: GuardError): Promise<ErrorChoice>;
   /** Brief confirmation after the sanitized prompt was sent. */
   notifySanitizedSent(): void;
+  /** Close any open dialog, resolving it as dismissed (no send). */
+  dismiss(): void;
 }
 
 export interface EditorOps {
@@ -51,6 +61,8 @@ export interface EditorOps {
   setPromptText(text: string): boolean;
   focusEditor(): void;
   submitApproved(approvedText: string): boolean;
+  /** True while the site would not accept a prompt anyway (e.g. streaming). */
+  isSiteBusy?(): boolean;
 }
 
 export interface SubmitGuardOptions {
@@ -68,6 +80,8 @@ export const DUPLICATE_WINDOW_MS = 1_500;
 export type GuardResult =
   | "ignored-busy"
   | "ignored-duplicate"
+  | "site-busy"
+  | "navigated"
   | "empty"
   | "submitted"
   | "submitted-sanitized"
@@ -94,6 +108,8 @@ export class SubmitGuard {
   private readonly now: () => number;
   private busy = false;
   private lastSent: { text: string; at: number } | null = null;
+  /** Incremented by invalidate(); attempts from an older epoch are stale. */
+  private epoch = 0;
 
   constructor(options: SubmitGuardOptions) {
     this.opts = options;
@@ -102,6 +118,17 @@ export class SubmitGuard {
 
   get isBusy(): boolean {
     return this.busy;
+  }
+
+  /**
+   * The page changed under us (SPA navigation to another chat): drop any
+   * in-flight attempt, close its dialog, and release the lock. The stale
+   * attempt can no longer send anything.
+   */
+  invalidate(): void {
+    this.epoch++;
+    this.busy = false;
+    this.opts.ui.dismiss();
   }
 
   /** Entry point for every intercepted submit attempt. */
@@ -115,46 +142,56 @@ export class SubmitGuard {
     ) {
       return "ignored-duplicate";
     }
+    if (this.opts.editor.isSiteBusy?.()) return "site-busy";
     this.busy = true;
+    const epoch = this.epoch;
     try {
-      return await this.checkCurrentPrompt();
+      return await this.checkCurrentPrompt(epoch);
     } catch {
+      if (epoch !== this.epoch) return "navigated";
       // Defensive: an unexpected error must never turn into a send.
       await this.opts.ui.showError({ title: FAIL_CLOSED_MESSAGE, detail: "Unexpected error", retryable: false });
       return "error-closed";
     } finally {
-      this.busy = false;
+      // A stale attempt must not release the lock of a newer one.
+      if (epoch === this.epoch) this.busy = false;
     }
   }
 
-  private async checkCurrentPrompt(): Promise<GuardResult> {
+  private stale(epoch: number): boolean {
+    return epoch !== this.epoch;
+  }
+
+  private async checkCurrentPrompt(epoch: number): Promise<GuardResult> {
     const text = this.opts.editor.getPromptText();
     if (text === null) {
-      return this.error({ title: FAIL_CLOSED_MESSAGE, detail: MESSAGES.unreadable, retryable: true });
+      return this.error({ title: FAIL_CLOSED_MESSAGE, detail: MESSAGES.unreadable, retryable: true }, epoch);
     }
     if (text.trim() === "") return "empty";
-    return this.evaluate(text, false);
+    return this.evaluate(text, false, epoch);
   }
 
   /** Analyze `text` (the current editor content) and enforce the decision. */
-  private async evaluate(text: string, isSanitized: boolean): Promise<GuardResult> {
+  private async evaluate(text: string, isSanitized: boolean, epoch: number): Promise<GuardResult> {
     const { editor, ui } = this.opts;
     const outcome = await this.opts.analyze(text);
+    if (this.stale(epoch)) return "navigated";
 
     // The verdict only applies to the exact text that was analyzed.
     if (editor.getPromptText() !== text) return "changed";
 
     if (!outcome.ok) {
-      return this.error({ title: FAIL_CLOSED_MESSAGE, detail: outcome.error.detail, retryable: true });
+      return this.error({ title: FAIL_CLOSED_MESSAGE, detail: outcome.error.detail, retryable: true }, epoch);
     }
 
     const response = outcome.response;
     switch (response.decision) {
       case "ALLOW":
-        return this.submit(text, isSanitized);
+        return this.submit(text, isSanitized, epoch);
 
       case "BLOCK": {
         const choice = await ui.showBlocked(response);
+        if (this.stale(epoch)) return "navigated";
         if (choice === "edit") editor.focusEditor();
         return "blocked";
       }
@@ -162,15 +199,17 @@ export class SubmitGuard {
       case "SANITIZE": {
         if (isSanitized) {
           // Sanitizing once did not resolve it; never loop or send.
-          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedStillRisky, retryable: false });
+          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedStillRisky, retryable: false }, epoch);
         }
         if (response.sanitized_prompt === null) {
           // Nothing to offer; treat as blocked rather than sending the original.
           const choice = await ui.showBlocked(response);
+          if (this.stale(epoch)) return "navigated";
           if (choice === "edit") editor.focusEditor();
           return "blocked";
         }
         const choice = await ui.showSanitize(response);
+        if (this.stale(epoch)) return "navigated";
         if (choice === "edit") {
           editor.focusEditor();
           return "edit";
@@ -180,30 +219,32 @@ export class SubmitGuard {
         // "Use Sanitized Prompt": only if the prompt is still the one analyzed.
         if (editor.getPromptText() !== text) return "changed";
         if (!editor.setPromptText(response.sanitized_prompt)) {
-          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedWriteFailed, retryable: false });
+          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedWriteFailed, retryable: false }, epoch);
         }
         const written = editor.getPromptText();
         if (written === null) {
-          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedWriteFailed, retryable: false });
+          return this.error({ title: MESSAGES.notSent, detail: MESSAGES.sanitizedWriteFailed, retryable: false }, epoch);
         }
         // Re-check exactly what is now in the editor before sending it.
-        return this.evaluate(written, true);
+        return this.evaluate(written, true, epoch);
       }
     }
   }
 
-  private async submit(text: string, isSanitized: boolean): Promise<GuardResult> {
+  private async submit(text: string, isSanitized: boolean, epoch: number): Promise<GuardResult> {
+    if (this.stale(epoch)) return "navigated";
     if (!this.opts.editor.submitApproved(text)) {
-      return this.error({ title: MESSAGES.notSent, detail: MESSAGES.siteNotReady, retryable: true }, "submit-failed");
+      return this.error({ title: MESSAGES.notSent, detail: MESSAGES.siteNotReady, retryable: true }, epoch, "submit-failed");
     }
     this.lastSent = { text, at: this.now() };
     if (isSanitized) this.opts.ui.notifySanitizedSent();
     return isSanitized ? "submitted-sanitized" : "submitted";
   }
 
-  private async error(error: GuardError, result: GuardResult = "error-closed"): Promise<GuardResult> {
+  private async error(error: GuardError, epoch: number, result: GuardResult = "error-closed"): Promise<GuardResult> {
     const choice = await this.opts.ui.showError(error);
-    if (choice === "retry" && error.retryable) return this.checkCurrentPrompt();
+    if (this.stale(epoch)) return "navigated";
+    if (choice === "retry" && error.retryable) return this.checkCurrentPrompt(epoch);
     if (choice === "edit") this.opts.editor.focusEditor();
     return result;
   }

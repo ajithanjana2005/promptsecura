@@ -10,3 +10,4 @@ dist/
 *.zip
 .DS_Store
 .test-dist/
+.e2e-dist/

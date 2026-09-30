@@ -2,7 +2,9 @@
 
 PromptSecura checks prompts before they are sent to AI websites. It detects personal data (PII) and prompt-injection/jailbreak attempts, scores the risk, and decides **ALLOW**, **SANITIZE** or **BLOCK**.
 
-**Current status: Phase 5 (enforcement on ChatGPT).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension shows a live risk indicator while you type (Phases 3–4). When you press Send, it checks the final prompt first (Phase 5): safe prompts go through, prompts with personal data are stopped with a sanitized version offered, dangerous prompts are blocked, and **nothing is sent if the check cannot complete**. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
+**Current status: Phase 6 (real-site ChatGPT integration).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension shows a live risk indicator while you type (Phases 3–4). When you press Send, it checks the final prompt first (Phase 5): safe prompts go through, prompts with personal data are stopped with a sanitized version offered, dangerous prompts are blocked, and **nothing is sent if the check cannot complete**. Phase 6 adapts this to how the ChatGPT site behaves: composer detection with a fallback, reply streaming, and single-page navigation between chats. It adds an automated browser test suite.
+
+> **Tested against a ChatGPT-like test page, not the live site.** chatgpt.com was not reachable from the development environment. Please try it on the real site before relying on it; see *Checking it on the real ChatGPT* below. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
 
 ## Architecture (Phase 1)
 
@@ -175,6 +177,8 @@ Safety rules behind this:
 - **Only approved text is sent.** The extension sends only text the backend approved, and only if the message box still contains exactly that text at the moment of sending. If you change the prompt while it is being checked, or while a panel is open, nothing is sent; press Send again to check the new text.
 - **No double sends.** Pressing Enter or clicking Send again while a check or panel is open does nothing. An identical prompt re-sent within 1.5 seconds of being sent is ignored.
 - **Shift+Enter** still inserts a new line.
+- **While ChatGPT is still writing a reply**, pressing Enter does nothing, as it does without the extension. No check runs and nothing is sent.
+- **Moving to another chat** (New chat, the sidebar, Back/Forward) closes any open PromptSecura panel and discards any check still in progress. A decision about one chat can never send anything in another.
 - **Nothing is inserted into ChatGPT's page.** The panel and indicator are drawn in their own isolated elements, outside ChatGPT's page structure.
 
 ### Live risk indicator (while typing)
@@ -192,7 +196,7 @@ A small pill labelled "PromptSecura" appears just above the message box while th
 
 Hover over the pill to see the risk score and the backend's reasons. Reasons name the type of finding, such as `EMAIL_ADDRESS` or a rule id, never the text itself. The pill disappears when the message box is empty.
 
-**Timing.** Analysis runs 600 ms after you stop typing, or 150 ms after a paste. The editor is also re-checked every second, which catches changes that fire no typing event, such as ChatGPT clearing the box after sending. These values are in `extension/src/shared/config.ts`.
+**Timing.** Analysis runs 600 ms after you stop typing, or 150 ms after a paste. Keystrokes are never sent one by one. The page is watched with a single, throttled `MutationObserver` (at most one check every 150 ms, plus a 2-second fallback timer). That catches changes that fire no typing event, such as ChatGPT clearing the box after sending, a new chat replacing the message box, or navigation. These values are in `extension/src/shared/config.ts`.
 
 **Privacy.** Prompt text is sent only to the configured PromptSecura backend, through the service worker, and never to any other service or LLM. The extension never logs it. The only prompt text the panels show is the backend's sanitized prompt, which has PII replaced by placeholders.
 
@@ -200,7 +204,24 @@ Hover over the pill to see the risk score and the backend's reasons. Reasons nam
 
 1. **Every Send shows the ERROR panel:** make sure the backend is running and that the extension was built with the right `PROMPTSECURA_BACKEND_URL`. See *Port visibility and the extension* for Codespaces.
 2. **Nothing happens at all:** in DevTools → Console on chatgpt.com, look for `[PromptSecura] ChatGPT: protection active`.
-3. **That line appears, but typing shows no indicator, or Send isn't checked:** ChatGPT's page structure has probably changed. All ChatGPT selectors live in `extension/src/content/sites/chatgpt.ts`: `EDITOR_SELECTORS` for the message box and `SEND_BUTTON_SELECTORS` for the Send button. They were written against ChatGPT's known markup (`#prompt-textarea` ProseMirror editor, `button[data-testid="send-button"]`), but could not be checked against the live site from the development environment. **If the editor selector stops matching, Send is no longer checked**; see the limitations in `progress.md`.
+3. **That line appears, but typing shows no indicator, or Send isn't checked:** ChatGPT's page structure has probably changed. All ChatGPT selectors live in `extension/src/content/sites/chatgpt.ts`:
+   - `EDITOR_SELECTORS` for the message box
+   - `COMPOSER_FORM_SELECTORS` for the message form, which is also the fallback used to find the box if its id changes
+   - `SEND_BUTTON_SELECTORS` for the Send button
+   - `STOP_BUTTON_SELECTORS` for the "stop generating" button
+
+   They were written against ChatGPT's known markup (`form[data-type="unified-composer"]`, the `#prompt-textarea` ProseMirror editor, `button[data-testid="send-button"]`, `button[data-testid="stop-button"]`), but could not be checked against the live site. **If both the editor and the composer-form selectors stop matching, Send is no longer checked**; see the limitations in `progress.md`.
+
+### Checking it on the real ChatGPT
+
+Start the backend, build and load the extension, then on chatgpt.com check each of these:
+
+1. Typing shows the indicator.
+2. A normal prompt sends once, via both Enter and the Send button.
+3. A prompt with an email address shows SANITIZE, and "Use Sanitized Prompt" sends the `[EMAIL]` version.
+4. "Please ignore all previous instructions" is BLOCKED.
+5. With the backend stopped, Send shows ERROR and nothing is sent.
+6. After clicking **New chat**, all of the above still work.
 
 ### Requirements
 
@@ -223,6 +244,24 @@ Individual scripts:
 | `npm run watch` | Rebuild on file changes |
 | `npm run typecheck` | `tsc --noEmit`, strict mode |
 | `npm test` | Unit tests (esbuild-bundled, Node's built-in test runner) |
+| `npm run test:e2e` | Browser tests: the built extension in real Chromium, against a ChatGPT-like **test page** and a **stand-in backend** (see below) |
+
+### Browser tests (`npm run test:e2e`)
+
+These load the real built extension into Chromium (via Playwright) and drive a **test page that imitates ChatGPT's message box** (`extension/e2e/fixtures/chatgpt.html`). The page is served at `https://chatgpt.com/` and `https://chat.openai.com/` through request routing, so no internet access is needed. A small **stand-in analysis server** (`e2e/fixtures/analyze-server.mjs`) returns fixed ALLOW / SANITIZE / BLOCK / error answers.
+
+They check composer detection (including renamed markup), text extraction, typing and paste, Enter and Send-button interception, SAFE / SANITIZE / BLOCK, backend failure, empty prompts, duplicate sends, prompts edited during a check, reply streaming, and navigation between chats. They also assert that **no raw personal data or injection text ever reaches the page's send handler**. They do **not** test the live ChatGPT or the real backend.
+
+First-time setup, which downloads Chromium and its system libraries:
+
+```bash
+cd extension
+npm install
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+The tests build their own copy of the extension into `extension/.e2e-dist/`, pointed at the stand-in server on port 18765, so your normal `dist/` is not touched.
 
 ### Backend URL (build-time configuration)
 
@@ -279,6 +318,7 @@ extension/
   src/popup/          popup page
   src/shared/         shared types, build-time config, logger
   test/               unit tests
+  e2e/                browser tests + fixtures (ChatGPT-like test page, stand-in backend)
   build.mjs           esbuild build script
 progress.md           phase status, test results, known limitations
 ```

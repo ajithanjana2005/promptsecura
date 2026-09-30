@@ -3,6 +3,7 @@
 //   node build.mjs               development build -> dist/
 //   node build.mjs --production  minified, no source maps
 //   node build.mjs --watch       rebuild on change
+//   node build.mjs --outdir=DIR  write to DIR instead of dist/ (used by e2e tests)
 //
 // Configuration (environment variables):
 //   PROMPTSECURA_BACKEND_URL  backend origin, default http://localhost:8000
@@ -19,7 +20,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(ROOT, "src");
-const DIST = path.join(ROOT, "dist");
+const outdirArg = process.argv.find((a) => a.startsWith("--outdir="));
+const DIST = outdirArg ? path.resolve(ROOT, outdirArg.slice("--outdir=".length)) : path.join(ROOT, "dist");
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 /** Validate and normalise the backend URL to a bare origin. Throws on invalid input. */

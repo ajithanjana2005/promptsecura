@@ -1,0 +1,151 @@
+<!doctype html>
+<!--
+  TEST FIXTURE — an APPROXIMATION of ChatGPT's composer, NOT the real site.
+
+  Served by the e2e tests at https://chatgpt.com/ and https://chat.openai.com/
+  (via request routing; no network access). It models the parts of ChatGPT
+  that PromptSecura's adapter depends on, as publicly observed:
+
+    - <form data-type="unified-composer"> containing a ProseMirror-style
+      contenteditable div#prompt-textarea.ProseMirror with a placeholder
+      paragraph (<p class="placeholder"><br class="ProseMirror-trailingBreak">),
+      plus a hidden fallback <textarea name="prompt-textarea">.
+    - The send button (button#composer-submit-button[data-testid="send-button"])
+      exists only while the box has text; otherwise a voice button is shown.
+      While a reply "streams", a stop button (data-testid="stop-button") is shown.
+    - Enter (without Shift) sends; the editor is cleared asynchronously.
+    - SPA navigation with history.pushState / popstate; each route change
+      remounts the composer (new elements), like a React remount.
+
+  Query options:
+    ?variant=click    send button is type="button" with a click handler
+                      (default: type="submit" + form submit handler)
+    ?markup=fallback  editor has no id/class and the send button only
+                      data-testid (tests the adapter's composer-form fallback)
+    ?stream=MS        simulated reply streaming time (default 700)
+
+  Everything the page "sends" is recorded in window.__sent — this stands in
+  for ChatGPT receiving the prompt.
+-->
+<html lang="en" class="light">
+<head>
+  <meta charset="utf-8" />
+  <title>ChatGPT (PromptSecura test fixture)</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    nav { display: flex; gap: 12px; padding: 12px; border-bottom: 1px solid #eee; }
+    main { height: calc(100vh - 50px); display: flex; flex-direction: column; justify-content: flex-end; }
+    form { margin: 0 auto 24px; width: 700px; border: 1px solid #ccc; border-radius: 24px; padding: 12px; display: flex; gap: 8px; align-items: flex-end; }
+    .editor { flex: 1; min-height: 24px; outline: none; }
+    .editor p { margin: 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/" id="new-chat" data-testid="create-new-chat-button">New chat</a>
+    <a href="/gpts" id="nav-gpts">Explore GPTs</a>
+  </nav>
+  <main><div id="composer-root"></div></main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const VARIANT = params.get("variant") === "click" ? "click" : "submit";
+    const FALLBACK = params.get("markup") === "fallback";
+    const STREAM_MS = Number(params.get("stream") ?? 700);
+    const PLACEHOLDER = '<p data-placeholder="Ask anything" class="placeholder"><br class="ProseMirror-trailingBreak"></p>';
+
+    window.__sent = [];
+    window.__mounts = 0;
+    let chatCounter = 0;
+    let streaming = false;
+    const root = document.getElementById("composer-root");
+
+    const editor = () => root.querySelector('[contenteditable="true"]');
+    const text = () => (editor()?.innerText ?? "").replace(/\n+$/, "");
+
+    function trailingButton() {
+      if (streaming) {
+        return '<button type="button" data-testid="stop-button" aria-label="Stop streaming">■</button>';
+      }
+      if (text().trim()) {
+        const type = VARIANT === "click" ? "button" : "submit";
+        return FALLBACK
+          ? `<button type="${type}" data-testid="send-button">↑</button>`
+          : `<button type="${type}" id="composer-submit-button" aria-label="Send prompt" data-testid="send-button">↑</button>`;
+      }
+      return '<button type="button" data-testid="composer-speech-button" aria-label="Start voice mode">🎤</button>';
+    }
+    function updateButtons() {
+      const slot = root.querySelector(".trailing");
+      if (slot) slot.innerHTML = trailingButton();
+    }
+
+    function send(via) {
+      if (streaming) return;
+      const t = text();
+      if (!t.trim()) return;
+      window.__sent.push({ via, t, path: location.pathname });
+      // React-like: the editor is cleared asynchronously, then a reply streams.
+      setTimeout(() => {
+        const ed = editor();
+        if (ed) ed.innerHTML = PLACEHOLDER;
+        streaming = true;
+        updateButtons();
+        setTimeout(() => { streaming = false; updateButtons(); }, STREAM_MS);
+      }, 30);
+    }
+
+    function mountComposer() {
+      window.__mounts++;
+      const editorAttrs = FALLBACK
+        ? 'class="editor" contenteditable="true"'
+        : 'id="prompt-textarea" class="editor ProseMirror" contenteditable="true" translate="no"';
+      root.innerHTML = `
+        <form class="composer" data-type="unified-composer">
+          <textarea name="prompt-textarea" placeholder="Ask anything" style="display:none"></textarea>
+          <div ${editorAttrs}>${PLACEHOLDER}</div>
+          <span class="trailing"></span>
+        </form>`;
+      updateButtons();
+      const ed = editor();
+      const form = root.querySelector("form");
+      ed.addEventListener("input", () => {
+        ed.querySelector("p.placeholder")?.classList.remove("placeholder");
+        updateButtons();
+      });
+      ed.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("enter"); }
+      });
+      form.addEventListener("submit", (e) => { e.preventDefault(); send("form"); });
+      form.addEventListener("click", (e) => {
+        const btn = e.target.closest("button");
+        if (!btn) return;
+        if (btn.dataset.testid === "send-button" && VARIANT === "click") send("click");
+        if (btn.dataset.testid === "stop-button") { streaming = false; updateButtons(); }
+      });
+    }
+
+    function render() {
+      if (location.pathname.startsWith("/gpts")) {
+        root.innerHTML = '<p id="gpts-page">Explore GPTs (no composer on this page)</p>';
+      } else {
+        mountComposer();
+      }
+    }
+    function navigate(path) {
+      history.pushState({}, "", path + location.search);
+      render();
+    }
+
+    document.getElementById("new-chat").addEventListener("click", (e) => {
+      e.preventDefault();
+      navigate(`/c/chat-${++chatCounter}`);
+    });
+    document.getElementById("nav-gpts").addEventListener("click", (e) => {
+      e.preventDefault();
+      navigate("/gpts");
+    });
+    window.addEventListener("popstate", render);
+    render();
+  </script>
+</body>
+</html>

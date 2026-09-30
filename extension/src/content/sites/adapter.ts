@@ -26,6 +26,20 @@ export interface AdapterCapabilities {
 /** Why the prompt text may have changed. */
 export type InputReason = "input" | "paste";
 
+/**
+ * Reported by observeComposer() whenever the page may have changed: the
+ * composer appeared, disappeared or was replaced, its content changed, or
+ * the SPA navigated to another URL.
+ */
+export interface ComposerChange {
+  /** The page URL changed since the last report (SPA navigation). */
+  navigated: boolean;
+  /** The editor element is a different element (or appeared/disappeared). */
+  editorChanged: boolean;
+  /** Whether a prompt editor is currently on the page. */
+  hasEditor: boolean;
+}
+
 /** How the user tried to submit. */
 export type SubmitSource = "enter" | "button" | "form";
 
@@ -75,6 +89,19 @@ export interface SiteAdapter {
 
   /** Put keyboard focus in the prompt editor (e.g. for "Edit Prompt"). */
   focusEditor(): void;
+
+  /**
+   * True while the site itself would not accept a new prompt (e.g. a reply is
+   * still being generated). Submit attempts are then ignored, as the site
+   * itself would ignore them.
+   */
+  isSiteBusy(): boolean;
+
+  /**
+   * Watch the page for composer/navigation changes (SPA). Must be
+   * lightweight: coalesced, and must not react to PromptSecura's own UI.
+   */
+  observeComposer(listener: (change: ComposerChange) => void): Unsubscribe;
 
   /**
    * Intercept every submit attempt (Enter, send button, form submit): the

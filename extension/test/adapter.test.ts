@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { findAdapter, hostnameMatches } from "../src/content/sites/adapter";
-import { ChatGPTAdapter, EDITOR_SELECTORS, SEND_BUTTON_SELECTORS } from "../src/content/sites/chatgpt";
+import {
+  ChatGPTAdapter,
+  COMPOSER_FORM_SELECTORS,
+  EDITOR_SELECTORS,
+  SEND_BUTTON_SELECTORS,
+  STOP_BUTTON_SELECTORS,
+} from "../src/content/sites/chatgpt";
 
 const adapter = new ChatGPTAdapter();
 
@@ -41,6 +47,21 @@ test("ChatGPT adapter is inert without a DOM", () => {
   const unsubscribe = adapter.onSubmitAttempt(() => {});
   assert.equal(typeof unsubscribe, "function");
   unsubscribe();
+});
+
+test("composer observation and readiness are inert without a DOM", () => {
+  assert.equal(adapter.isSiteBusy(), false);
+  const stop = adapter.observeComposer(() => {
+    throw new Error("must not be called without a DOM");
+  });
+  assert.equal(typeof stop, "function");
+  stop();
+});
+
+test("composer-form and stop-button selectors are ChatGPT-specific", () => {
+  assert.equal(COMPOSER_FORM_SELECTORS[0], 'form[data-type="unified-composer"]');
+  assert.ok(COMPOSER_FORM_SELECTORS.every((s) => s.startsWith("form")));
+  assert.equal(STOP_BUTTON_SELECTORS[0], 'button[data-testid="stop-button"]');
 });
 
 test("send-button selectors are ChatGPT-specific and isolated in the adapter", () => {

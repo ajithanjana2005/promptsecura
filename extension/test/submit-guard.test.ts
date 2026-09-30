@@ -53,6 +53,10 @@ function backend(text: string): AnalyzeOutcome {
 /** Fake editor + site: records exactly what the site actually received. */
 class FakeEditor implements EditorOps {
   text: string | null;
+  siteBusy = false;
+  isSiteBusy() {
+    return this.siteBusy;
+  }
   sent: string[] = [];
   writes: string[] = [];
   focused = 0;
@@ -92,13 +96,28 @@ class FakeUI implements EnforcementUI {
   sanitizedShown: (string | null)[] = [];
   blockedScores: number[] = [];
   sanitizedSentNotices = 0;
+  dismissed = 0;
   onShow: (() => void) | null = null;
+  /** When true, dialogs stay open until dismiss() is called. */
+  holdOpen = false;
+  private pending: (() => void)[] = [];
+
+  private hold<C>(choice: C, onDismiss: C): Promise<C> {
+    if (!this.holdOpen) return Promise.resolve(choice);
+    return new Promise<C>((resolve) => this.pending.push(() => resolve(onDismiss)));
+  }
+  dismiss() {
+    this.dismissed++;
+    const pending = this.pending;
+    this.pending = [];
+    for (const resolve of pending) resolve();
+  }
 
   async showSanitize(r: AnalyzeResponse) {
     this.shown.push("sanitize");
     this.sanitizedShown.push(r.sanitized_prompt);
     this.onShow?.();
-    return this.sanitizeChoices.shift() ?? "cancel";
+    return this.hold<SanitizeChoice>(this.sanitizeChoices.shift() ?? "cancel", "cancel");
   }
   async showBlocked(r: AnalyzeResponse) {
     this.shown.push("blocked");
@@ -333,4 +352,92 @@ test("no duplicate submission: the same text right after sending is not resent",
   clock.t += DUPLICATE_WINDOW_MS; // later, a deliberate resend is a normal attempt
   assert.equal(await guard.handleSubmitAttempt(), "submitted");
   assert.equal(editor.sent.length, 2);
+});
+
+// --- Phase 6: real-site behaviour ----------------------------------------------------
+
+test("site busy (reply streaming): the attempt is ignored without analysis and nothing is sent", async () => {
+  const { editor, ui, guard, analyzed } = setup("Summarize this document.");
+  editor.siteBusy = true;
+  assert.equal(await guard.handleSubmitAttempt(), "site-busy");
+  assert.deepEqual(analyzed, []);
+  assert.deepEqual(editor.sent, []);
+  assert.deepEqual(ui.shown, []);
+  editor.siteBusy = false;
+  assert.equal(await guard.handleSubmitAttempt(), "submitted");
+});
+
+test("navigation during analysis: the stale ALLOW is never used and the lock is released", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const { editor, guard } = setup("same text in old and new chat", async (t) => {
+    if (++calls === 1) await gate;
+    return backend(t);
+  });
+  const stale = guard.handleSubmitAttempt();
+  guard.invalidate(); // SPA navigation to another chat
+  assert.equal(guard.isBusy, false); // the new page is not blocked by the old check
+  // A new attempt on the new page proceeds normally...
+  assert.equal(await guard.handleSubmitAttempt(), "submitted");
+  editor.text = "same text in old and new chat"; // even if the text happens to match
+  release();
+  // ...and the stale attempt does not send a second time.
+  assert.equal(await stale, "navigated");
+  assert.deepEqual(editor.sent, ["same text in old and new chat"]);
+});
+
+test("navigation while the SANITIZE dialog is open closes it and sends nothing", async () => {
+  const { editor, ui, guard } = setup(ORIGINAL_PII);
+  ui.holdOpen = true;
+  ui.sanitizeChoices = ["use-sanitized"];
+  const attempt = guard.handleSubmitAttempt();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(ui.shown, ["sanitize"]);
+  guard.invalidate();
+  // Race against a timeout so a dialog that is NOT closed fails cleanly instead of hanging.
+  const outcome = await Promise.race([attempt, new Promise((r) => setTimeout(() => r("still-open"), 200))]);
+  assert.equal(outcome, "navigated");
+  assert.equal(ui.dismissed, 1);
+  assert.deepEqual(editor.sent, []);
+  assert.deepEqual(editor.writes, []);
+});
+
+test("a stale attempt finishing does not release a newer attempt's lock", async () => {
+  let releaseOld!: () => void;
+  let releaseNew!: () => void;
+  const gates = [new Promise<void>((r) => (releaseOld = r)), new Promise<void>((r) => (releaseNew = r))];
+  let n = 0;
+  const { editor, guard } = setup("text", async (t) => {
+    await gates[n++];
+    return backend(t);
+  });
+  editor.clearsOnSend = false;
+  const old = guard.handleSubmitAttempt();
+  guard.invalidate();
+  const current = guard.handleSubmitAttempt();
+  releaseOld();
+  assert.equal(await old, "navigated");
+  assert.equal(guard.isBusy, true); // still held by the current attempt
+  assert.equal(await guard.handleSubmitAttempt(), "ignored-busy");
+  releaseNew();
+  assert.equal(await current, "submitted");
+  assert.deepEqual(editor.sent, ["text"]);
+});
+
+test("navigation during analysis: a stale SANITIZE/BLOCK verdict never opens a dialog on the new page", async () => {
+  for (const prompt of [ORIGINAL_PII, DANGEROUS]) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { editor, ui, guard } = setup(prompt, async (t) => {
+      await gate;
+      return backend(t);
+    });
+    const stale = guard.handleSubmitAttempt();
+    guard.invalidate();
+    release();
+    assert.equal(await stale, "navigated");
+    assert.deepEqual(ui.shown, [], `no dialog for a stale verdict (${prompt.slice(0, 12)}…)`);
+    assert.deepEqual(editor.sent, []);
+  }
 });
