@@ -1,0 +1,21 @@
+{
+  "name": "PromptSecura",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" }
+  },
+  "hostRequirements": {
+    "memory": "4gb"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "PromptSecura API",
+      "onAutoForward": "notify"
+    }
+  },
+  "containerEnv": {
+    "PROMPTSECURA_SPACY_MODEL": "en_core_web_lg"
+  }
+}

@@ -1,0 +1,75 @@
+# PromptSecura prompt-injection / jailbreak rules — Phase 1 baseline.
+#
+# Matching details (see app/pipeline/injection.py):
+#   * Patterns are Python regular expressions, matched case-insensitively.
+#   * Text is lower-cased and all whitespace (including newlines) is collapsed
+#     to single spaces before matching, so write patterns with single spaces.
+#   * Each rule counts at most once per prompt; its weight is added to the
+#     injection score (capped at 100).
+#   * Use single-quoted YAML strings so backslashes are taken literally.
+#
+# Weight guide (default thresholds: 0-30 ALLOW, 31-60 SANITIZE, 61-100 BLOCK):
+#   60-75  strong, unambiguous signal -> blocks on its own
+#   40-55  clear signal -> medium risk alone; blocks because sanitization
+#          cannot remove injection text
+#   15-30  weak / ambiguous signal -> allowed alone, contributes when combined
+#
+# These rules are a baseline, not a guarantee. Paraphrased attacks will be
+# missed and some benign prompts will match. Add a test in
+# tests/test_injection.py for every rule you add or change.
+
+version: 1
+
+rules:
+  - id: instruction_override
+    category: prompt_injection
+    description: Attempts to make the model ignore or override its previous instructions
+    weight: 70
+    patterns:
+      - '\b(ignore|disregard|forget|override|bypass)\b(?: \w+){0,3} (previous|prior|above|earlier|preceding|all|your|the|any|system)(?: \w+){0,2} (instructions?|rules|directions|directives|guidelines|prompts?)\b'
+      - '\b(ignore|disregard|forget)\b (everything|all) (above|before|previously|you were told)\b'
+
+  - id: system_prompt_extraction
+    category: prompt_injection
+    description: Attempts to extract the hidden system prompt or initial instructions
+    weight: 60
+    patterns:
+      - '\b(reveal|show|print|repeat|output|display|leak|dump|tell me|give me|what (is|are|was|were))\b(?: \w+){0,3} (your|the) (system|initial|hidden|original|secret|internal) (prompt|instructions?|message|rules|configuration)\b'
+      - '\b(repeat|print|output)\b (everything|all|the text|the words) (above|before this)\b'
+
+  - id: jailbreak_persona
+    category: jailbreak
+    description: Known jailbreak persona or unrestricted "mode" framing
+    weight: 65
+    patterns:
+      - '\bdo anything now\b'
+      - '\b(act as|you are|you are now|become|enable|enter) dan\b'
+      - '\bdan mode\b'
+      - '\b(developer|god|jailbreak|jailbroken|unrestricted|unfiltered|uncensored) mode\b'
+
+  - id: fake_system_delimiter
+    category: prompt_injection
+    description: Injected chat-template or system-message delimiters
+    weight: 50
+    patterns:
+      - '<\|?\s?(system|im_start|im_end|endoftext)\s?\|?>'
+      - '\[/?(system|inst)\]'
+      - '<<\s?/?sys\s?>>'
+      - '#{2,3} ?(system|new instructions)\b'
+
+  - id: safety_bypass_request
+    category: jailbreak
+    description: Requests to disable safety filters, restrictions or content policies
+    weight: 30
+    patterns:
+      - '\b(bypass|disable|remove|turn off|ignore|without)(?: \w+){0,2} (safety|content) (filters?|policy|policies|guidelines|restrictions)\b'
+      - '\b(bypass|disable|remove|turn off)(?: \w+){0,2} (restrictions|guardrails|censorship|filters?)\b'
+
+  - id: role_override
+    category: jailbreak
+    description: Attempts to redefine the model's identity or remove its constraints
+    weight: 25
+    patterns:
+      - '\byou are no longer\b'
+      - '\bfrom now on,? you (are|will|must|shall)\b'
+      - '\b(pretend|imagine|act as if) (that )?you (have no|are not bound by|are free from) (rules|restrictions|limits|guidelines|filters)\b'

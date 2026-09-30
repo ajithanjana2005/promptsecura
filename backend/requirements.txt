@@ -1,0 +1,21 @@
+# PromptSecura backend — runtime + test dependencies.
+# Install from backend/:  pip install -r requirements.txt
+# Then download the spaCy model:  python -m spacy download en_core_web_lg
+#
+# Ranges rather than exact pins: these were NOT resolved in the environment
+# where the code was written (no network). Run `pip freeze > requirements.lock`
+# in the Codespace once installed and working, to pin known-good versions.
+
+# Web API
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29
+pydantic>=2.6,<3.0
+
+# Security pipeline
+presidio-analyzer>=2.2.354,<3.0
+spacy>=3.7,<4.0
+PyYAML>=6.0
+
+# Tests
+pytest>=8.0
+httpx>=0.27
