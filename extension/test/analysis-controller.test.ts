@@ -215,3 +215,32 @@ test("dispose stops further requests and renders", async () => {
   assert.equal(calls.length, 0);
   assert.equal(states.length, rendered);
 });
+
+test("analyzeNow checks immediately (no debounce) and returns the outcome", async () => {
+  const { timers, calls, controller, kinds } = setup();
+  const pending = controller.analyzeNow("final text");
+  assert.deepEqual(calls.map((c) => c.text), ["final text"]); // no timer needed
+  calls[0]!.resolve({ ok: true, response: response("BLOCK", 80) });
+  const outcome = await pending;
+  assert.equal(outcome.ok && outcome.response.decision, "BLOCK");
+  assert.deepEqual(kinds(), ["analyzing", "high"]);
+  timers.advance(5000);
+  assert.equal(calls.length, 1);
+});
+
+test("analyzeNow cancels a pending debounced check for the same text", () => {
+  const { timers, calls, controller } = setup();
+  controller.onTextChanged("typed", "input");
+  void controller.analyzeNow("typed");
+  timers.advance(5000);
+  assert.deepEqual(calls.map((c) => c.text), ["typed"]);
+});
+
+test("analyzeNow returns failures (fail-closed) instead of throwing", async () => {
+  const { calls, controller } = setup();
+  const pending = controller.analyzeNow("x");
+  calls[0]!.reject(new Error("boom"));
+  const outcome = await pending;
+  assert.equal(outcome.ok, false);
+  assert.equal(controller.state.kind, "unavailable");
+});

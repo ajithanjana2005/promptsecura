@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { findAdapter, hostnameMatches } from "../src/content/sites/adapter";
-import { ChatGPTAdapter, EDITOR_SELECTORS } from "../src/content/sites/chatgpt";
+import { ChatGPTAdapter, EDITOR_SELECTORS, SEND_BUTTON_SELECTORS } from "../src/content/sites/chatgpt";
 
 const adapter = new ChatGPTAdapter();
 
@@ -17,24 +17,15 @@ test("ChatGPT adapter matches ChatGPT hosts over HTTPS only", () => {
   assert.equal(adapter.matches(new URL("https://gemini.google.com/")), false);
 });
 
-test("ChatGPT adapter is read-only: can read/observe, cannot write or intercept", () => {
+test("ChatGPT adapter declares all capabilities (enforcement)", () => {
   assert.equal(adapter.id, "chatgpt");
   assert.equal(adapter.displayName, "ChatGPT");
   assert.deepEqual({ ...adapter.capabilities }, {
     readPrompt: true,
     observeInput: true,
-    writePrompt: false,
-    interceptSubmit: false,
+    writePrompt: true,
+    interceptSubmit: true,
   });
-  assert.equal(adapter.setPromptText("x"), false);
-  let called = false;
-  const unsubscribe = adapter.onSubmitAttempt(async () => {
-    called = true;
-    return true;
-  });
-  assert.equal(typeof unsubscribe, "function");
-  unsubscribe();
-  assert.equal(called, false);
 });
 
 test("ChatGPT adapter is inert without a DOM", () => {
@@ -44,6 +35,17 @@ test("ChatGPT adapter is inert without a DOM", () => {
   const stop = adapter.observeInput(() => {});
   assert.equal(typeof stop, "function");
   stop();
+  // No DOM: nothing can be written or submitted.
+  assert.equal(adapter.findSendButton(), null);
+  assert.equal(adapter.submitApproved("anything"), false);
+  const unsubscribe = adapter.onSubmitAttempt(() => {});
+  assert.equal(typeof unsubscribe, "function");
+  unsubscribe();
+});
+
+test("send-button selectors are ChatGPT-specific and isolated in the adapter", () => {
+  assert.equal(SEND_BUTTON_SELECTORS[0], 'button[data-testid="send-button"]');
+  assert.ok(SEND_BUTTON_SELECTORS.every((s) => s.startsWith("button")));
 });
 
 test("editor selectors target the ChatGPT composer, most specific first", () => {

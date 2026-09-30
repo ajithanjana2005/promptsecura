@@ -11,6 +11,10 @@
  *  - analyze() failures (including thrown errors) become "unavailable";
  *    nothing here can produce "safe" without a backend ALLOW.
  *
+ * analyzeNow() (Phase 5) runs an immediate, non-debounced check for the
+ * final Send and returns the raw backend outcome to the caller (the submit
+ * guard). It shares the same sequencing, indicator and result cache.
+ *
  * DOM-free and timer-injectable, so it is unit-tested with fake timers.
  */
 
@@ -89,6 +93,18 @@ export class AnalysisController {
     this.schedule(value, delay);
   }
 
+  /**
+   * Analyze `text` immediately (no debounce), update the indicator, and
+   * return the backend outcome. Never throws; failures are returned as
+   * `{ ok: false }`.
+   */
+  async analyzeNow(text: string): Promise<AnalyzeOutcome> {
+    this.cancelPending();
+    this.lastSeenText = text;
+    if (!this.disposed) this.setState({ kind: "analyzing" });
+    return this.run(text);
+  }
+
   dispose(): void {
     this.disposed = true;
     this.cancelPending();
@@ -110,7 +126,7 @@ export class AnalysisController {
     }
   }
 
-  private async run(text: string): Promise<void> {
+  private async run(text: string): Promise<AnalyzeOutcome> {
     const seq = ++this.sequence;
     let outcome: AnalyzeOutcome;
     try {
@@ -127,11 +143,12 @@ export class AnalysisController {
         },
       };
     }
-    if (this.disposed || seq !== this.sequence) return; // stale: text changed since
+    if (this.disposed || seq !== this.sequence) return outcome; // stale for the indicator
     const state = stateFromOutcome(outcome);
     // Cache only real verdicts; failures should be retried on the next change.
     this.lastResult = state.kind === "unavailable" ? null : { text, state };
     this.setState(state);
+    return outcome;
   }
 
   private setState(state: IndicatorState): void {

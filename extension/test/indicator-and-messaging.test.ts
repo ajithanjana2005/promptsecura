@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { LABELS, labelFor, stateFromOutcome, tooltipFor } from "../src/content/indicator-state";
+import { describeFindings, entityName } from "../src/content/findings";
 import { createAnalyzer, isAnalyzeOutcome } from "../src/content/messaging";
 import { FAIL_CLOSED_MESSAGE } from "../src/shared/config";
 import type { AnalyzeOutcome, AnalyzeResponse } from "../src/shared/types";
@@ -90,4 +91,24 @@ test("malformed or missing replies fail closed", async () => {
 test("isAnalyzeOutcome accepts real failures from the service worker", () => {
   assert.ok(isAnalyzeOutcome(fail("http", 503)));
   assert.ok(isAnalyzeOutcome({ ok: true, response: RESPONSE }));
+});
+
+// --- enforcement panel findings --------------------------------------------------
+
+test("findings name entity types and threat categories, never values", () => {
+  const f = describeFindings({
+    ...RESPONSE,
+    risk_level: "high",
+    pii_summary: { PHONE_NUMBER: 1, EMAIL_ADDRESS: 2 },
+    pii_entities: [
+      { entity_type: "EMAIL_ADDRESS", start: 0, end: 5, score: 1, placeholder: "[EMAIL]", source: "presidio" },
+    ],
+    injection_matches: [
+      { rule_id: "instruction_override", category: "prompt_injection", description: "Overrides instructions", weight: 70 },
+    ],
+  });
+  assert.deepEqual(f.sensitiveData, ["Email address ×2", "Phone number ×1"]);
+  assert.deepEqual(f.threats, ["Prompt injection: Overrides instructions"]);
+  assert.equal(f.riskLine, "Risk 70/100 · High");
+  assert.equal(entityName("CUSTOM_TYPE"), "CUSTOM_TYPE");
 });

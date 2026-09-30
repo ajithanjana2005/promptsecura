@@ -1,17 +1,16 @@
 /**
  * PromptSecura content script entry point.
  *
- * Phase 4 (read-only): on a supported site, observe the prompt editor,
- * analyze its text through the service worker (debounced), and show the risk
- * indicator next to the composer.
- *
- * Read-only guarantee: nothing here blocks, delays, alters or intercepts
- * sending. The site's Enter key and send button behave exactly as without
- * the extension. Enforcement is a later phase and requires an adapter with
- * the interceptSubmit capability.
+ * - Live analysis (Phase 4): observe the prompt editor, analyze its text
+ *   through the service worker (debounced), show the risk indicator.
+ * - Enforcement (Phase 5): the adapter cancels every submit attempt and hands
+ *   it to the SubmitGuard, which re-analyzes the final text immediately
+ *   (AnalysisController.analyzeNow) and then sends, offers the sanitized
+ *   prompt, blocks, or fails closed.
  *
  * Privacy: prompt text goes only to the service worker (and from there to the
- * configured PromptSecura backend). It is never logged or shown on the page.
+ * configured PromptSecura backend). It is never logged. The only prompt text
+ * shown on the page is the backend's sanitized prompt (PII replaced).
  */
 
 import {
@@ -21,11 +20,13 @@ import {
 } from "../shared/config";
 import { log } from "../shared/log";
 import { AnalysisController } from "./analysis-controller";
+import { EnforcementPanel } from "./enforcement-ui";
 import { RiskIndicator } from "./indicator";
 import { createAnalyzer } from "./messaging";
 import type { SiteAdapter } from "./sites/adapter";
 import { findAdapter } from "./sites/adapter";
 import { ChatGPTAdapter } from "./sites/chatgpt";
+import { SubmitGuard } from "./submit-guard";
 
 /** Registered adapters. Add new sites here. */
 const ADAPTERS: readonly SiteAdapter[] = [new ChatGPTAdapter()];
@@ -68,9 +69,27 @@ function start(adapter: SiteAdapter): void {
   window.addEventListener("scroll", reposition, { passive: true, capture: true });
 
   controller.onTextChanged(adapter.getPromptText(), "init");
+
+  if (!adapter.capabilities.interceptSubmit || !adapter.capabilities.writePrompt) {
+    log.info(`${adapter.displayName}: read-only analysis active; sending is not enforced.`);
+    return;
+  }
+
+  // Enforcement: every submit attempt goes through the guard.
+  const panel = new EnforcementPanel(document, () => adapter.getIndicatorAnchor());
+  const guard = new SubmitGuard({
+    analyze: (text) => controller.analyzeNow(text),
+    editor: adapter,
+    ui: panel,
+  });
+  adapter.onSubmitAttempt((source) => {
+    void guard.handleSubmitAttempt().then((result) => {
+      log.debug("submit attempt", { source, result }); // metadata only, never text
+    });
+  });
   log.info(
-    `${adapter.displayName}: read-only analysis active. ` +
-      "Prompts are checked as you type; sending is not blocked or modified.",
+    `${adapter.displayName}: protection active. Prompts are checked before sending; ` +
+      "risky prompts are sanitized or blocked.",
   );
 }
 

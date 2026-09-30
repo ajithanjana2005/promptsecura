@@ -8,7 +8,7 @@
 | 2 | PII detection and sanitization | Code complete; **Codespaces verification pending** |
 | 3 | Chrome extension skeleton (MV3, TypeScript, esbuild) | Built and verified in sandbox Chromium; **`npm install` + typecheck with real `@types/chrome` pending** |
 | 4 | ChatGPT read-only integration (editor reading, debounced analysis, risk indicator) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page**; **live chatgpt.com not tested** |
-| 5 | Enforcement (recommended below) | Not started |
+| 5 | Enforcement on ChatGPT (ALLOW / SANITIZE / BLOCK / fail-closed on Send) | Built and verified in sandbox Chromium against a **ChatGPT-like fixture page** (chatgpt.com and chat.openai.com); **live ChatGPT not tested** |
 
 Phase numbering follows the instructions given per phase.
 
@@ -29,7 +29,15 @@ Phase numbering follows the instructions given per phase.
 - **Phase 3: the popup's "Protection status: Active"** is shown as requested. A note underneath describes what the extension actually does; since Phase 4 it reads "ChatGPT prompts are checked as you type (read-only). Sending is not blocked in this version." The backend status shows "Not checked" rather than a state that was never observed.
 - **Phase 4: the indicator follows the backend decision**, not just the risk level: ALLOW → Safe, SANITIZE → Medium Risk, BLOCK → High Risk. A medium score escalated to BLOCK therefore shows as High Risk, which matches what enforcement will do.
 - **Phase 4: any failure shows "Backend Unavailable" and never "Safe".** One exception: an HTTP 413 shows "Too Long to Analyze", because the backend is up and it is not an outage.
-- **Phase 4: strictly read-only.** Only passive, capture-phase `input` and `paste` listeners are registered. There are no keydown, click or submit listeners, `preventDefault` is never called, and nothing is written into ChatGPT's DOM. The indicator is a Shadow-DOM host attached to `<html>`, outside ChatGPT's React tree, and positioned with fixed coordinates.
+- **Phase 4: strictly read-only** (superseded for Send by Phase 5). Only passive, capture-phase `input` and `paste` listeners are registered. The indicator is a Shadow-DOM host attached to `<html>`, outside ChatGPT's React tree, and positioned with fixed coordinates.
+- **Phase 5: one interception path, inside the existing adapter.** `ChatGPTAdapter.onSubmitAttempt` registers `keydown` (Enter without Shift, not during IME composition, in the editor), `click` (send button) and `submit` (composer form) listeners on `window` in the capture phase. They run before ChatGPT's own handlers and cancel the event with `preventDefault()` + `stopImmediatePropagation()`. There is no second system: the adapter hands each attempt to `SubmitGuard`, which uses the existing `AnalysisController` (new `analyzeNow()`) and the existing service-worker/API-client path.
+- **Phase 5: the only way to send is `submitApproved(text)`.** It requires the editor to hold exactly `text`, then clicks ChatGPT's own send button (falling back to `form.requestSubmit()`) while a synchronous bypass flag is set. The flag is cleared before the call returns, so it can let through only that one programmatic send.
+- **Phase 5: `SubmitGuard` calls `submitApproved` in exactly two cases.** (a) ALLOW for the exact editor text. (b) After "Use Sanitized Prompt": the sanitized text is written, **re-analyzed**, and ALLOWed. Everything else sends nothing: SANITIZE without a choice, BLOCK, any failure, an unreadable editor, text changed during the check, a failed write, or a sanitized text that doesn't come back ALLOW.
+- **Phase 5: every Send gets a fresh backend check.** The debounced live result is never reused for the final decision.
+- **Phase 5: fail-closed is kept.** Any failure shows the ERROR panel ("PromptSecura could not complete the security analysis.", "Nothing was sent.") with Retry / Edit Prompt. Retry re-checks, and sends only on ALLOW.
+- **Phase 5: duplicate protection.** An in-flight lock ignores repeat attempts while a check or panel is open. After a send, identical text within 1.5 s is ignored, because ChatGPT clears its editor asynchronously.
+- **Phase 5: writing the sanitized prompt.** For contenteditable (ProseMirror), the editor contents are selected with a Range and replaced with `document.execCommand("insertText")`, so the editor's own state updates. For a textarea, the native value setter is used and an `input` event dispatched. The write is verified by reading back.
+- **Phase 5: enforcement panel.** Same Shadow-DOM approach and colours as the indicator. The badges are **SANITIZE** (amber), **BLOCKED** (red), **ERROR** (grey) and **SANITIZED** (green confirmation); SAFE sends with no panel. Findings are shown by entity type and threat category, never by value.
 - **Phase 4: debounce is 600 ms after typing and 150 ms after a paste**, with a 1 s editor poll. The poll catches changes without input events, such as ChatGPT clearing the editor after Send or a new chat replacing it. Stale responses are discarded with sequence numbers, and unchanged text is never re-sent.
 
 ## Implemented
@@ -94,6 +102,28 @@ All changes are in `extension/`; the backend is unchanged.
 - **`shared/config.ts`:** adds `TYPING_DEBOUNCE_MS`, `PASTE_DEBOUNCE_MS` and `EDITOR_POLL_MS`.
 - **Popup:** the note now describes read-only mode.
 - **Unchanged:** the service worker and API client needed no changes. The existing `promptsecura/analyze` route is now used by the content script.
+
+### Phase 5
+
+All changes are in `extension/`; the backend is unchanged.
+
+- **`content/sites/adapter.ts`:**
+  - `SubmitHandler` is now `(source: "enter" | "button" | "form") => void`, called after the adapter has already cancelled the site's submission.
+  - Adds `focusEditor()` and `submitApproved(approvedText)`.
+  - `setPromptText` now verifies that the write took effect.
+- **`content/sites/chatgpt.ts`:**
+  - All four capabilities are now true.
+  - New `SEND_BUTTON_SELECTORS`: `button[data-testid="send-button"]`, `button#composer-submit-button`, and `button[aria-label="Send prompt"|"Send message"]`.
+  - Submit interception, `setPromptText`, `focusEditor`, `submitApproved`, `findSendButton`.
+  - All ChatGPT selectors remain in this one file.
+- **`content/submit-guard.ts` (new):** the enforcement decision logic. It is DOM-free, with injected editor, UI and clock.
+- **`content/enforcement-ui.ts` (new):** the SANITIZE / BLOCKED / ERROR dialogs and the SANITIZED confirmation.
+  - The panels use `role="dialog"`, focus the primary button, and close on Esc or ×.
+  - All text is set with `textContent`.
+- **`content/findings.ts` (new):** entity-type and threat-category descriptions for the panel.
+- **`content/analysis-controller.ts`:** new `analyzeNow(text)`, an immediate check that returns the outcome and updates the indicator. `run()` now returns its outcome.
+- **`content/index.ts`:** wires `adapter.onSubmitAttempt` → `SubmitGuard` → `controller.analyzeNow` and the `EnforcementPanel`. It logs `protection active`.
+- **Popup:** the note now describes enforcement.
 
 ## Test status
 
@@ -212,6 +242,47 @@ A **fixture API server** returns canned ALLOW / SANITIZE / BLOCK / 503 responses
 
 **Not tested:** the live chatgpt.com, desktop Google Chrome, and the real backend over HTTP (FastAPI can't be installed here).
 
+### Phase 5 — extension
+
+There's still no npm registry access; the checks used the local esbuild 0.27.7 and TypeScript 6.0.3.
+
+| Check | Result |
+|---|---|
+| `npm run build` / `npm run build:prod` | **Passed.** |
+| `npm run typecheck` as shipped | **Still fails in the sandbox**, only because `@types/chrome` is missing (`TS2688`). This is unchanged from Phases 3–4. |
+| `tsc` strict against the sandbox-only `chrome.runtime` stub | **Passed, 0 errors.** |
+| `npm test` | **68/68 passed, 0 cancelled.** That's 42 from Phase 4 (adapter tests updated for the new capabilities), plus 26 new: 19 SubmitGuard, 3 controller `analyzeNow`, 1 findings, and 3 adapter. |
+| Mutation check (each mutation in an isolated copy) | **9/9 caught.** SANITIZE sends the original; backend failure fails open; BLOCK submits; no in-flight lock; sanitized text sent without a re-check; stale verdict used after an edit; `analyzeNow` throws instead of failing closed; adapter drops `interceptSubmit`; no post-send duplicate window. |
+| Real Chromium 141, Phase 5 harness | **36/36 passed.** See below. |
+| Real Chromium, Phase 3 harness (regression) | **21/21 passed**, with the content-script log expectation updated. |
+| Real Chromium, Phase 4 harness (regression) | **17/23.** All 6 failures are the intended Phase 5 changes: the read-only log line and popup note; "Enter still sends a High Risk prompt" and "Enter not prevented" (now intentionally reversed); and two follow-on checks that depended on that prompt being sent. All indicator, debounce, paste, position, isolation and privacy checks still pass. |
+| Backend | **0 files changed**; 83/83 offline backend tests pass. |
+
+About the test suite itself: the first version of the duplicate-submission unit test caught its mutation only by deadlocking, which cancelled the tests after it. It was rewritten so that a missing lock produces a clean assertion failure, and a realistic delayed-clear scenario was added.
+
+The Phase 5 harness is a sandbox-only script. It serves a **ChatGPT-like fixture page at both `https://chatgpt.com/` and `https://chat.openai.com/`**, with page-owned Enter and form-submit send handlers. A **fixture API server** returns canned decisions: SANITIZE with a real `[EMAIL]`-substituted `sanitized_prompt`, BLOCK for injection text, ALLOW otherwise, plus 503 / stopped-server modes. It adds a 250 ms delay so that repeated clicks overlap a check. The harness verified:
+
+- **SAFE:** a prompt is sent unchanged via Enter, and via the Send button, exactly once, with no panel.
+- **No duplicates:** Enter, Enter, click, Enter during one check → **sent exactly once**.
+- **MEDIUM:**
+  - The original is **not** sent.
+  - The panel shows the SANITIZE badge, "Risk 35/100 · Medium", "Email address ×1", and the sanitized prompt, with the buttons Use Sanitized Prompt / Edit Prompt / Cancel.
+  - **"Use Sanitized Prompt" sends exactly `Email [EMAIL] the notes`, once**, followed by the SANITIZED confirmation.
+  - Edit Prompt, Cancel, × and Esc each send nothing, close the panel, and keep the original text. Edit Prompt also focuses the editor.
+- **HIGH:**
+  - The panel shows the BLOCKED badge, "Risk 70/100 · High", and "Prompt injection: …", with no send option.
+  - The Send button and Enter while blocked, and repeated attempts, **never submit**.
+- **Failure:**
+  - With a 503, the ERROR panel shows the fail-closed message and "Nothing was sent", and nothing is submitted. Retry, once the backend recovers, sends exactly once.
+  - With the server stopped and a PII prompt, Retry and then close sends nothing.
+- **Shift+Enter** is not treated as a submit.
+- **chat.openai.com:** a SAFE prompt sends once, and a HIGH prompt is blocked.
+- **Across the whole run:**
+  - **No original PII and no injection text ever reached the page's send handler.** Everything that was sent: `hello world`, `second safe prompt`, `duplicate test`, `Email [EMAIL] the notes`, `safe text during outage`, `hello from chat.openai.com`.
+  - The console never contained prompt text.
+
+**Not tested:** the live chatgpt.com / chat.openai.com (unreachable from the sandbox), ChatGPT's real ProseMirror editor and React send handler, desktop Google Chrome, the real FastAPI backend over HTTP, and IME composition.
+
 ## Limitations
 
 - **Presidio has not been run.** Detection quality, recognizer names, and the specific test inputs (e.g. the credit-card format with spaces) are unconfirmed until the Codespace run.
@@ -222,9 +293,14 @@ A **fixture API server** returns canned ALLOW / SANITIZE / BLOCK / 503 responses
 - **Placeholders are generic.** Two different emails both become `[EMAIL]`, and the original values cannot be restored.
 - **Dependency ranges are not pinned** to verified versions yet. Run `pip freeze` after a green Codespace run.
 - **Rule-based injection detection** limitations are unchanged from Phase 1.
-- **The extension warns but does not protect yet.** It is read-only: High Risk prompts can still be sent. Enforcement is the next phase.
+- **Enforcement depends on the ChatGPT selectors, and fails OPEN if they break.** If ChatGPT changes its markup so that `EDITOR_SELECTORS` no longer match, Enter isn't recognized as a submit from the editor. If `SEND_BUTTON_SELECTORS` don't match either, the send button isn't intercepted, and prompts go to ChatGPT **unchecked**. This is inherent to DOM-based interception; the extension cannot enforce what it cannot see. The indicator not appearing while typing is the visible warning sign (see README → troubleshooting). A future hardening step could detect a missing composer and warn the user.
+- **Other ways of sending are not intercepted:** editing and resending an earlier message (ChatGPT's inline edit box), voice input, and file/image attachments. Only the main composer's Enter, send button and form submit are covered.
+- **Writing the sanitized prompt uses `document.execCommand("insertText")`.** It is deprecated but still supported by Chrome. It worked on the fixture's plain contenteditable, but has **not been tested against ChatGPT's real ProseMirror editor**. If the write doesn't take, nothing is sent and the user is told to edit manually.
+- **What was typed stays in ChatGPT's message box** after a BLOCK or SANITIZE, so the user can edit it. The extension prevents it from being *submitted*, but has no control over anything ChatGPT's page itself does with draft text before submission.
+- **Sending when ChatGPT isn't ready** (e.g. while a reply is still streaming and the send button is replaced): the check still runs, but the approved prompt can't be sent, and an error says to try again.
+- **IME composition (e.g. Japanese input):** Enter during composition is left alone. This path was not tested.
 - **The ChatGPT selectors have not been tested on the live chatgpt.com**, which is unreachable from the sandbox. They match ChatGPT's known composer markup, and were verified only against a fixture page that imitates it. This is the most likely point of failure. If the indicator never appears, check `EDITOR_SELECTORS` (see README → troubleshooting).
-- **After "Backend Unavailable", there is no automatic retry** while the text is unchanged. The next edit triggers a new check.
+- **The live indicator doesn't auto-retry after "Backend Unavailable"** while the text is unchanged. The next edit, or pressing Send, triggers a new check.
 - **The indicator position is heuristic.** It is placed above the right edge of the composer's `<form>`, and may need adjusting against the real layout.
 - **No `package-lock.json`** could be generated without registry access. The `@types/chrome` range (`>=0.0.268 <1`) has not been resolved against npm yet.
 - **Backend URL changes need a rebuild.** A runtime setting (popup/options) would require `optional_host_permissions`, which is planned for later.
@@ -236,17 +312,19 @@ A **fixture API server** returns canned ALLOW / SANITIZE / BLOCK / 503 responses
 1. **Verify everything with real dependencies first:**
    - `cd backend && python -m pytest` should give 110 passed, 0 skipped.
    - `cd extension && npm install && npm run check`.
-   - **New in Phase 4:** load `extension/dist` in desktop Chrome, run the backend, and type on the real chatgpt.com. Confirm that the indicator appears and changes state. If it doesn't, fix `EDITOR_SELECTORS` first; everything later depends on it.
-2. **Recommended Phase 5: enforcement on ChatGPT.**
-   - Implement `interceptSubmit`: capture Enter and the send button, re-analyze the final text on Send, and apply ALLOW / SANITIZE / BLOCK.
-   - Implement `writePrompt` for "Use Sanitized Prompt", plus "Edit" on BLOCK.
-   - Apply the agreed **fail-closed** Send policy: "PromptSecura could not complete the security analysis." with edit/retry.
+   - **On the real chatgpt.com** (desktop Chrome, backend running), confirm that:
+     - the indicator appears while typing;
+     - a SAFE prompt sends once, via both Enter and the button;
+     - an email address triggers SANITIZE, and "Use Sanitized Prompt" sends `[EMAIL]` text;
+     - "ignore all previous instructions" is BLOCKED;
+     - with the backend stopped, Send shows ERROR and nothing is sent.
+     If any of these fail, fix `EDITOR_SELECTORS` / `SEND_BUTTON_SELECTORS` / the sanitized write first.
+2. **The next phase is to be defined by you.** Natural candidates are hardening after live testing: warning when the composer can't be found (instead of failing open), a live backend health check in the popup, and extension↔backend authentication before any shared deployment.
 
 ## Deliberately deferred
 
 The following are out of scope so far:
 
-- Send interception and enforcement (BLOCK/SANITIZE on Send), writing the sanitized prompt, and fail-closed Send handling (backend and API client already support it)
 - Live backend health check in the popup, and extension↔backend authentication
 - Dashboard and database
 - Gemini and Claude support

@@ -2,7 +2,7 @@
 
 PromptSecura checks prompts before they are sent to AI websites. It detects personal data (PII) and prompt-injection/jailbreak attempts, scores the risk, and decides **ALLOW**, **SANITIZE** or **BLOCK**.
 
-**Current status: Phase 4 (ChatGPT read-only integration).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension analyzes the prompt as you type and shows a risk indicator next to the input (Phases 3–4). It is **read-only**: it never blocks, changes or intercepts sending. Enforcement comes in a later phase. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
+**Current status: Phase 5 (enforcement on ChatGPT).** The backend analyzes prompts (Phases 1–2). On ChatGPT, the extension shows a live risk indicator while you type (Phases 3–4). When you press Send, it checks the final prompt first (Phase 5): safe prompts go through, prompts with personal data are stopped with a sanitized version offered, dangerous prompts are blocked, and **nothing is sent if the check cannot complete**. See [`progress.md`](progress.md) for what exists, what has been tested, and what comes next.
 
 ## Architecture (Phase 1)
 
@@ -156,12 +156,30 @@ The rules live in `backend/app/rules/injection_rules.yaml`: regexes with weights
 The extension lives in `extension/`. It uses Manifest V3, TypeScript, and esbuild for bundling.
 
 - The **service worker** holds the API client for `POST /api/v1/analyze`, with a timeout, response validation and fail-closed errors. It is the only part that talks to the backend.
-- The **content script** runs on `chatgpt.com` and `chat.openai.com`. It reads the prompt editor as you type or paste, asks the service worker to analyze the text (debounced), and shows a risk indicator next to the input.
+- The **content script** runs on `chatgpt.com` and `chat.openai.com`. It shows a live risk indicator while you type, and it checks every Send (Enter or the Send button) before anything reaches ChatGPT.
 - The **popup** shows the protection status, the supported site (ChatGPT), the configured backend URL, and a backend status placeholder ("Not checked").
 
-### What you see on ChatGPT (read-only)
+### What happens when you press Send
 
-A small pill labelled "PromptSecura" appears just above the message box while there is text in it:
+Every Send is stopped first. Enter (without Shift) in the message box, the Send button, and submitting the message form are all caught before ChatGPT sees them. The final text is then checked by the backend immediately, with no debounce:
+
+| Backend decision | What PromptSecura does |
+|---|---|
+| **ALLOW** | Your prompt is sent unchanged, through ChatGPT's own Send button. |
+| **SANITIZE** | Nothing is sent. An amber **SANITIZE** panel appears above the message box. It shows the risk score, what was detected (e.g. "Email address ×1"), and the **sanitized prompt**, with PII replaced by placeholders such as `[EMAIL]`. You can choose one of three options:<br>• **Use Sanitized Prompt**: the sanitized text replaces your prompt in the message box, is **checked again**, and is sent only if that check returns ALLOW. A green **SANITIZED** confirmation follows.<br>• **Edit Prompt**: closes the panel and puts the cursor back in the message box.<br>• **Cancel** (or × / Esc): closes the panel.<br>The original prompt is never sent automatically. |
+| **BLOCK** | Nothing is sent. A red **BLOCKED** panel shows the risk score and the detected threats (e.g. "Prompt injection: …"). The only options are **Edit Prompt** and close, so there is no way to send the prompt anyway. |
+| **Check failed** | The backend was unreachable, returned an error or an invalid response, or the prompt couldn't be read from the page. Nothing is sent; this is fail-closed. A grey **ERROR** panel says "PromptSecura could not complete the security analysis." and offers **Retry** (check again, and send only if the backend now ALLOWs), **Edit Prompt**, or close. |
+
+Safety rules behind this:
+
+- **Only approved text is sent.** The extension sends only text the backend approved, and only if the message box still contains exactly that text at the moment of sending. If you change the prompt while it is being checked, or while a panel is open, nothing is sent; press Send again to check the new text.
+- **No double sends.** Pressing Enter or clicking Send again while a check or panel is open does nothing. An identical prompt re-sent within 1.5 seconds of being sent is ignored.
+- **Shift+Enter** still inserts a new line.
+- **Nothing is inserted into ChatGPT's page.** The panel and indicator are drawn in their own isolated elements, outside ChatGPT's page structure.
+
+### Live risk indicator (while typing)
+
+A small pill labelled "PromptSecura" appears just above the message box while there is text in it. It is a preview; the decision that counts is made when you press Send.
 
 | Indicator | Meaning |
 |---|---|
@@ -174,17 +192,15 @@ A small pill labelled "PromptSecura" appears just above the message box while th
 
 Hover over the pill to see the risk score and the backend's reasons. Reasons name the type of finding, such as `EMAIL_ADDRESS` or a rule id, never the text itself. The pill disappears when the message box is empty.
 
-**Sending is not affected.** Enter and the Send button work exactly as they do without the extension, even at High Risk. The extension doesn't listen to key presses, clicks or form submits, and never changes ChatGPT's page. The indicator is drawn in its own isolated element, outside ChatGPT's page structure. Blocking and sanitizing before Send come in the enforcement phase.
-
 **Timing.** Analysis runs 600 ms after you stop typing, or 150 ms after a paste. The editor is also re-checked every second, which catches changes that fire no typing event, such as ChatGPT clearing the box after sending. These values are in `extension/src/shared/config.ts`.
 
-**Privacy.** Prompt text is sent only to the configured PromptSecura backend, through the service worker. It is never logged by the extension or shown in the indicator.
+**Privacy.** Prompt text is sent only to the configured PromptSecura backend, through the service worker, and never to any other service or LLM. The extension never logs it. The only prompt text the panels show is the backend's sanitized prompt, which has PII replaced by placeholders.
 
-**If the indicator never appears on ChatGPT:**
+**Troubleshooting on ChatGPT:**
 
-1. Make sure the backend is running and that the extension was built with the right `PROMPTSECURA_BACKEND_URL`.
-2. In DevTools → Console on chatgpt.com, look for `[PromptSecura] ChatGPT: read-only analysis active`.
-3. If that line appears but typing shows nothing, ChatGPT's page structure has probably changed. The editor selectors live in `EDITOR_SELECTORS` in `extension/src/content/sites/chatgpt.ts`. They were written against ChatGPT's known composer markup (`#prompt-textarea`, a ProseMirror editor), but could not be checked against the live site from the development environment.
+1. **Every Send shows the ERROR panel:** make sure the backend is running and that the extension was built with the right `PROMPTSECURA_BACKEND_URL`. See *Port visibility and the extension* for Codespaces.
+2. **Nothing happens at all:** in DevTools → Console on chatgpt.com, look for `[PromptSecura] ChatGPT: protection active`.
+3. **That line appears, but typing shows no indicator, or Send isn't checked:** ChatGPT's page structure has probably changed. All ChatGPT selectors live in `extension/src/content/sites/chatgpt.ts`: `EDITOR_SELECTORS` for the message box and `SEND_BUTTON_SELECTORS` for the Send button. They were written against ChatGPT's known markup (`#prompt-textarea` ProseMirror editor, `button[data-testid="send-button"]`), but could not be checked against the live site from the development environment. **If the editor selector stops matching, Send is no longer checked**; see the limitations in `progress.md`.
 
 ### Requirements
 
@@ -258,7 +274,8 @@ extension/
   src/manifest.json   MV3 manifest (build adds backend host permission)
   src/background/     service worker + backend API client
   src/content/        content script: site adapters (sites/), analysis controller,
-                      indicator UI, service-worker messaging
+                      submit guard (enforcement), indicator + enforcement panel UI,
+                      service-worker messaging
   src/popup/          popup page
   src/shared/         shared types, build-time config, logger
   test/               unit tests

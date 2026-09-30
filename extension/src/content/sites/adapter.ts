@@ -26,8 +26,15 @@ export interface AdapterCapabilities {
 /** Why the prompt text may have changed. */
 export type InputReason = "input" | "paste";
 
-/** Called when the user tries to submit. Return true to let the submit proceed. */
-export type SubmitHandler = (promptText: string) => Promise<boolean>;
+/** How the user tried to submit. */
+export type SubmitSource = "enter" | "button" | "form";
+
+/**
+ * Called when the user tries to submit. By the time it is called the
+ * adapter has ALREADY cancelled the site's submission; the only way the
+ * prompt is sent afterwards is an explicit `submitApproved(text)` call.
+ */
+export type SubmitHandler = (source: SubmitSource) => void;
 
 /** Stops a previously registered listener. */
 export type Unsubscribe = () => void;
@@ -60,14 +67,29 @@ export interface SiteAdapter {
    */
   observeInput(listener: (reason: InputReason) => void): Unsubscribe;
 
-  /** Replace the prompt text. Returns false if not supported or it failed. */
+  /**
+   * Replace the prompt text and verify the editor now holds it. Returns
+   * false if not supported, no editor is present, or the write did not take.
+   */
   setPromptText(text: string): boolean;
 
+  /** Put keyboard focus in the prompt editor (e.g. for "Edit Prompt"). */
+  focusEditor(): void;
+
   /**
-   * Register a handler for submit attempts. Adapters without the
-   * interceptSubmit capability must not register anything and return a no-op.
+   * Intercept every submit attempt (Enter, send button, form submit): the
+   * site's own submission is cancelled and `handler` is called instead.
+   * Adapters without the interceptSubmit capability must not register
+   * anything and return a no-op.
    */
   onSubmitAttempt(handler: SubmitHandler): Unsubscribe;
+
+  /**
+   * Submit through the site's own send mechanism, but ONLY if the editor
+   * currently contains exactly `approvedText`. Returns false (and sends
+   * nothing) otherwise, or if no send control could be found.
+   */
+  submitApproved(approvedText: string): boolean;
 }
 
 /**
