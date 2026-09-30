@@ -1,0 +1,23 @@
+{
+  "name": "promptsecura-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PromptSecura Chrome extension (Manifest V3)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:prod": "node build.mjs --production",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node scripts/run-tests.mjs",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/chrome": ">=0.0.268 <1",
+    "esbuild": "^0.27.7",
+    "typescript": "^6.0.3"
+  }
+}

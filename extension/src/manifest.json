@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "PromptSecura",
+  "version": "0.1.0",
+  "description": "Checks prompts for personal data and prompt-injection attempts before they are sent to AI websites.",
+  "minimum_chrome_version": "120",
+  "action": {
+    "default_title": "PromptSecura",
+    "default_popup": "popup/index.html"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content/index.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [],
+  "host_permissions": []
+}

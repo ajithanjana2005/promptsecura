@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PromptSecura</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --fg: #1a1d24;
+        --muted: #5b6270;
+        --line: #e4e7ec;
+        --ok: #16803c;
+        --pending: #8a6100;
+        --brand: #14213d;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16181d;
+          --fg: #eceef2;
+          --muted: #a2a9b6;
+          --line: #2c3039;
+          --ok: #4ade80;
+          --pending: #fbbf24;
+          --brand: #0b1222;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 300px;
+        font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        padding: 12px 14px;
+        background: var(--brand);
+        color: #fff;
+      }
+      header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+      header span { font-size: 11px; opacity: 0.75; }
+      dl { margin: 0; }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      dt { color: var(--muted); }
+      dd { margin: 0; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+      .ok { color: var(--ok); }
+      .pending { color: var(--pending); }
+      .note { margin: 0; padding: 10px 14px; color: var(--muted); font-size: 12px; }
+      code { font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>PromptSecura</h1>
+      <span id="version"></span>
+    </header>
+    <dl>
+      <div class="row">
+        <dt>Protection status</dt>
+        <dd class="ok" id="protection-status">Active</dd>
+      </div>
+      <div class="row">
+        <dt>Supported site</dt>
+        <dd id="supported-sites"></dd>
+      </div>
+      <div class="row">
+        <dt>Backend</dt>
+        <dd class="pending" id="backend-status">Not checked</dd>
+      </div>
+      <div class="row">
+        <dt>Backend URL</dt>
+        <dd><code id="backend-url"></code></dd>
+      </div>
+    </dl>
+    <p class="note" id="build-note">
+      Prompt checks on ChatGPT are not enabled in this build yet.
+    </p>
+    <script src="popup.js"></script>
+  </body>
+</html>
