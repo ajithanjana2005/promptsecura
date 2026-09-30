@@ -31,6 +31,7 @@ def health(request: Request) -> HealthResponse:
         status="ok" if ready else "degraded",
         version=request.app.state.settings.version,
         components=components,
+        details=dict(request.app.state.component_details),
     )
 
 

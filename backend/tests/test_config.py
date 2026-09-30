@@ -15,6 +15,8 @@ def test_defaults():
     assert s.cors_origins == ()
     assert "EMAIL_ADDRESS" in s.pii_entities
     assert DEFAULT_RULES_PATH.is_file()
+    assert s.spacy_model_fallbacks == ("en_core_web_sm",)
+    assert s.pii_contextual_phone is True
 
 
 def test_env_overrides():
@@ -30,8 +32,12 @@ def test_env_overrides():
             "PROMPTSECURA_INJECTION_RULES_PATH": "/tmp/rules.yaml",
             "PROMPTSECURA_MAX_PROMPT_CHARS": "500",
             "PROMPTSECURA_PII_SCORE_THRESHOLD": "0.6",
+            "PROMPTSECURA_SPACY_MODEL_FALLBACKS": "",
+            "PROMPTSECURA_PII_CONTEXTUAL_PHONE": "false",
         }
     )
+    assert s.spacy_model_fallbacks == ()
+    assert s.pii_contextual_phone is False
     assert (s.thresholds.allow_max, s.thresholds.sanitize_max) == (20, 50)
     assert s.spacy_model == "en_core_web_sm"
     assert s.pii_entities == ("EMAIL_ADDRESS", "PHONE_NUMBER")
@@ -51,6 +57,7 @@ def test_invalid_values_raise():
         {"PROMPTSECURA_MAX_PROMPT_CHARS": "0"},
         {"PROMPTSECURA_LOG_LEVEL": "LOUD"},
         {"PROMPTSECURA_PII_ENTITIES": " , "},
+        {"PROMPTSECURA_PII_CONTEXTUAL_PHONE": "maybe"},
     ]
     for env in bad_envs:
         with pytest.raises(ValueError):

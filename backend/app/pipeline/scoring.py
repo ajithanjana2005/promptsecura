@@ -26,7 +26,7 @@ DEFAULT_PII_WEIGHTS: dict[str, int] = {
     "CREDIT_CARD": 50,
     "EMAIL_ADDRESS": 35,
     "PHONE_NUMBER": 35,
-    "IP_ADDRESS": 30,
+    "IP_ADDRESS": 35,
     "PERSON": 15,
     "URL": 5,
 }

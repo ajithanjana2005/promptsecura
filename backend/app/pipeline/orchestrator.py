@@ -19,7 +19,6 @@ from collections import Counter
 from app.pipeline.base import (
     AnalysisIncompleteError,
     AnalysisResult,
-    Decision,
     InjectionDetector,
     PIIDetector,
 )
@@ -80,10 +79,14 @@ class AnalysisOrchestrator:
         )
         decision = decide(breakdown, bool(pii_entities), self._thresholds)
 
-        sanitized = redact(pre.text, pii_entities) if decision.decision is Decision.SANITIZE else None
+        # A sanitized version is produced whenever PII was found, whatever the
+        # decision. Only a SANITIZE decision means it is safe to send as-is;
+        # for BLOCK it helps the user edit, but other risks may remain.
+        sanitized = redact(pre.text, pii_entities) if pii_entities else None
+        pii_counts = Counter(e.entity_type for e in pii_entities)
 
         reasons: list[str] = []
-        for entity_type, count in sorted(Counter(e.entity_type for e in pii_entities).items()):
+        for entity_type, count in sorted(pii_counts.items()):
             reasons.append(f"Sensitive information detected: {entity_type} x{count}")
         for match in injection_matches:
             reasons.append(f"{match.description} (rule: {match.rule_id})")
@@ -98,13 +101,14 @@ class AnalysisOrchestrator:
 
         logger.info(
             "analysis_complete request_id=%s site=%s prompt_chars=%d decision=%s "
-            "risk_score=%d pii_count=%d injection_rules=%s hidden_chars=%d latency_ms=%.2f",
+            "risk_score=%d pii_count=%d pii_types=%s injection_rules=%s hidden_chars=%d latency_ms=%.2f",
             request_id,
             site,
             pre.original_length,
             decision.decision.value,
             breakdown.total,
             len(pii_entities),
+            ",".join(sorted(pii_counts)) or "-",
             ",".join(m.rule_id for m in injection_matches) or "-",
             pre.hidden_chars_removed,
             latency_ms,

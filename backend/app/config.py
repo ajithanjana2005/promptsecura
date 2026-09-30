@@ -61,6 +61,18 @@ def _float(env: Mapping[str, str], name: str, default: float) -> float:
         raise ValueError(f"{ENV_PREFIX}{name} must be a number, got {raw!r}") from exc
 
 
+def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = _raw(env, name)
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{ENV_PREFIX}{name} must be true/false, got {raw!r}")
+
+
 def _csv(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     raw = _raw(env, name)
     if raw is None:
@@ -74,6 +86,9 @@ class Settings:
     version: str = __version__
     log_level: str = "INFO"
     spacy_model: str = "en_core_web_lg"
+    # Tried in order if spacy_model is not installed. /health reports which one loaded.
+    spacy_model_fallbacks: tuple[str, ...] = ("en_core_web_sm",)
+    pii_contextual_phone: bool = True
     pii_entities: tuple[str, ...] = DEFAULT_PII_ENTITIES
     pii_score_threshold: float = 0.4
     injection_rules_path: Path = DEFAULT_RULES_PATH
@@ -105,9 +120,17 @@ class Settings:
 
         rules_raw = _raw(env, "INJECTION_RULES_PATH")
 
+        fallbacks_raw = env.get(ENV_PREFIX + "SPACY_MODEL_FALLBACKS")
+        if fallbacks_raw is None:
+            fallbacks: tuple[str, ...] = ("en_core_web_sm",)
+        else:  # empty string disables fallbacks
+            fallbacks = tuple(m.strip() for m in fallbacks_raw.split(",") if m.strip())
+
         return cls(
             log_level=(_raw(env, "LOG_LEVEL") or "INFO").upper(),
             spacy_model=_raw(env, "SPACY_MODEL") or "en_core_web_lg",
+            spacy_model_fallbacks=fallbacks,
+            pii_contextual_phone=_bool(env, "PII_CONTEXTUAL_PHONE", True),
             pii_entities=_csv(env, "PII_ENTITIES", DEFAULT_PII_ENTITIES),
             pii_score_threshold=_float(env, "PII_SCORE_THRESHOLD", 0.4),
             injection_rules_path=Path(rules_raw) if rules_raw else DEFAULT_RULES_PATH,

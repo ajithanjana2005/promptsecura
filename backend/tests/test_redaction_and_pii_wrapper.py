@@ -61,7 +61,7 @@ def test_placeholder_for_unknown_type():
 def test_presidio_wrapper_maps_results_and_passes_settings():
     fake = FakeAnalyzer([FakeRecognizerResult("EMAIL_ADDRESS", 12, 28, 1.0)])
     detector = PresidioPIIDetector(fake, entities=["EMAIL_ADDRESS"], score_threshold=0.4)
-    assert detector.detect(TEXT) == [PIIEntity("EMAIL_ADDRESS", 12, 28, 1.0)]
+    assert detector.detect(TEXT) == [PIIEntity("EMAIL_ADDRESS", 12, 28, 1.0, source="presidio")]
     assert fake.last_kwargs == {
         "text": TEXT,
         "entities": ["EMAIL_ADDRESS"],
@@ -82,3 +82,17 @@ def test_presidio_wrapper_error_does_not_leak_text():
     with pytest.raises(DetectorError) as info:
         detector.detect(TEXT)
     assert "anjana" not in str(info.value)
+
+
+def test_presidio_wrapper_records_recognizer_name_as_source():
+    fake = FakeAnalyzer([FakeRecognizerResult("EMAIL_ADDRESS", 12, 28, 1.0, "EmailRecognizer")])
+    detector = PresidioPIIDetector(fake, ["EMAIL_ADDRESS"], 0.4, model_name="en_core_web_lg")
+    assert detector.detect(TEXT)[0].source == "presidio:EmailRecognizer"
+    assert detector.name == "presidio(en_core_web_lg)"
+
+
+def test_redact_all_six_supported_types_uses_expected_placeholders():
+    text = "A B C D E F"
+    types = ["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON", "CREDIT_CARD", "IP_ADDRESS", "URL"]
+    entities = [PIIEntity(t, i * 2, i * 2 + 1, 0.9) for i, t in enumerate(types)]
+    assert redact(text, entities) == "[EMAIL] [PHONE] [PERSON] [CREDIT_CARD] [IP_ADDRESS] [URL]"

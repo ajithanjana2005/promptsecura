@@ -45,13 +45,15 @@ class PIIEntity:
     """A span of detected PII. Offsets refer to the normalized text.
 
     The matched text itself is intentionally not stored, so results can be
-    logged or returned without echoing sensitive values.
+    logged or returned without echoing sensitive values. ``source`` names the
+    detector/recognizer that produced it (e.g. "presidio:EmailRecognizer").
     """
 
     entity_type: str
     start: int
     end: int
     score: float
+    source: str = "unknown"
 
 
 @dataclass(frozen=True)

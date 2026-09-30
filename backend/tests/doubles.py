@@ -35,7 +35,8 @@ class EmailOnlyPIIDetector:
 
     def detect(self, text: str) -> list[PIIEntity]:
         return [
-            PIIEntity("EMAIL_ADDRESS", m.start(), m.end(), 1.0) for m in _EMAIL.finditer(text)
+            PIIEntity("EMAIL_ADDRESS", m.start(), m.end(), 1.0, source=self.name)
+            for m in _EMAIL.finditer(text)
         ]
 
 
@@ -54,11 +55,14 @@ class FailingDetector:
 class FakeRecognizerResult:
     """Mimics the attributes of presidio_analyzer.RecognizerResult."""
 
-    def __init__(self, entity_type: str, start: int, end: int, score: float) -> None:
+    def __init__(
+        self, entity_type: str, start: int, end: int, score: float, recognizer: str | None = None
+    ) -> None:
         self.entity_type = entity_type
         self.start = start
         self.end = end
         self.score = score
+        self.recognition_metadata = {"recognizer_name": recognizer} if recognizer else {}
 
 
 class FakeAnalyzer:
